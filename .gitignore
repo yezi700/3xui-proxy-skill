@@ -30,3 +30,7 @@ Thumbs.db
 # 临时目录
 tmp/
 .cache/
+
+# 脚本产出的备份（含真实凭据，绝不能进仓库）
+backup/
+vps/

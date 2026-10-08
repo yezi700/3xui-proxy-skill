@@ -3,7 +3,7 @@ name: 3xui-proxy-skill
 description: 在全新 VPS 上部署 3x-ui 面板与抗封锁代理节点（VLESS-REALITY+Vision / Hysteria2 / TUIC v5），覆盖非交互安装、Let's Encrypt 证书、iptables 加固、BBR 调优、面板 API 建站、合并订阅与端到端真机验证。当用户要求「搭梯子 / 部署机场节点 / 装 3x-ui / 配 Reality、Hysteria2、TUIC / 照教程部署代理 / 自建科学上网」时使用。Deploy a censorship-resistant proxy stack (3x-ui panel + VLESS-REALITY, Hysteria2, TUIC v5) on a fresh VPS with non-interactive install, ACME certs, iptables hardening and end-to-end verification.
 description_zh: 在 VPS 上部署 3x-ui 面板与 Reality / Hysteria2 / TUIC 代理节点
 description_en: Deploy a 3x-ui panel with VLESS-REALITY, Hysteria2 and TUIC v5 proxy nodes on a VPS
-version: 1.0.0
+version: 1.1.0
 agent_created: true
 ---
 
@@ -77,9 +77,22 @@ python scripts/ssh_run.py -c "systemctl is-active x-ui 2>/dev/null || echo 'x-ui
 python scripts/ssh_run.py -f scripts/setup_base.sh
 ```
 
-做四件事：设时区 → 装依赖 → 配 iptables 白名单 → 启用 BBR。
+做五件事：设时区 → 装依赖 → 配 iptables 白名单 → **屏蔽 IPv6（可选）** → 启用 BBR。
 
 ⚠️ **不要用 UFW**：Debian 12+ 上 `ufw` 与 `iptables-persistent` 互斥，装了会把 UFW 卸载并留下残缺规则。用纯 iptables。
+
+**关于 IPv6（`DISABLE_IPV6=1`，默认开启）**：
+
+3x-ui 生成的 Xray 配置里 `routing.domainStrategy = "AsIs"`，域名交给系统解析；
+VPS 若有可用 IPv6，glibc 会优先返回 AAAA，**代理出口就变成 IPv6**。
+脚本会：
+
+1. **先**把 `/etc/resolv.conf` 换成纯 IPv4 DNS（原文件备份到 `/root/.xui-skill/resolv.conf.bak`）
+2. 写入 `/etc/sysctl.d/99-disable-ipv6.conf` 关掉 IPv6
+3. 把 `rules.v6` 收紧到只放行 lo / established / icmpv6
+4. 做一次 IPv4 + DNS 自检，**失败自动回滚**，避免把机器搞成断网
+
+不需要屏蔽 IPv6 时把 `deploy.env` 里 `DISABLE_IPV6` 设为 `0`。详见 `references/pitfalls.md` §4.4。
 
 ### Step 3 · 安装面板 + 申请证书
 
@@ -98,6 +111,22 @@ python scripts/ssh_run.py -f scripts/deploy_nodes.py
 
 创建 3 个入站（Reality / Hysteria2 / TUIC），并生成随机凭据。
 凭据会打印出来，**必须原样记入交付文档**。
+
+### Step 4.5 · TUIC 兼容性加固（强烈建议）
+
+```bash
+python scripts/fix_tuic_0rtt.py
+```
+
+把 TUIC 入站的 `zero_rtt_handshake` 关掉（默认是 `true`）。
+
+**为什么必须做**：3x-ui 的 TUIC 认证依赖 TLS Keying Material Exporter，
+而 `internal/tuic/auth.go` 里有 `if !cs.HandshakeComplete { return ErrInvalidTLSState }`。
+**0-RTT 连接在认证时握手尚未完成**，于是认证直接被拒（连接以 `0x100` 关闭）。
+服务端开着 `Allow0RTT` 时，任何启用 0-RTT 的客户端都会踩中——
+包括**面板自己导出的 Clash 配置**（默认 `reduce-rtt: true`）。
+
+脚本会先备份原 inbound JSON 再改。详见 `references/pitfalls.md` §6.3。
 
 ### Step 5 · 合并订阅
 
@@ -141,6 +170,13 @@ python scripts/render_report.py -o .
 - 常用运维命令
 - 注意事项
 
+⚠️ **兼容性矩阵必须写两条，不能只写一条**：
+
+1. **sing-box 系**（Hiddify / Karing / NekoBox / 旧 Shadowrocket）→ 连不上 REALITY，用 Hy2/TUIC
+2. **Xray 系**（v2rayN 默认 / v2rayNG）→ 连不上 Hy2/TUIC，只能用 REALITY
+
+只写一条的话，用户会在两种"连不上"之间来回折腾。详见 `references/pitfalls.md` §6.4。
+
 ## 关键约束（务必遵守）
 
 1. **不要删除 `/root/cert/`** —— 面板、Hysteria2、TUIC 共用这里的证书。
@@ -151,6 +187,9 @@ python scripts/render_report.py -o .
 5. **动手前先备份**：`cp /etc/x-ui/x-ui.db /root/x-ui-backup-$(date +%Y%m%d-%H%M).db`。
 6. **不要用 `pkill -f` / `pgrep -f` 匹配自己的脚本**（会匹配到脚本自身命令行导致自杀），用 PID 文件。
 7. 涉及删除、覆盖、改端口等破坏性操作前，先向用户说明并取得确认。
+8. **TUIC 入站要把 `zero_rtt_handshake` 设为 `false`**（Step 4.5），否则部分客户端重连时认证失败。
+9. **Xray-core 不支持 TUIC / Hysteria2**。遇到"某客户端连不上 TUIC"先问清客户端内核，
+   不要盲目改服务端配置——先用 `journalctl -u x-ui | grep tuic` 看服务端日志再判断。
 
 ## 参考资料
 
@@ -169,9 +208,10 @@ python scripts/render_report.py -o .
 |---|---|
 | `scripts/ssh_run.py` | 通用 SSH 执行器（跑单条命令或整个脚本文件，自动注入 `deploy.env`） |
 | `scripts/xui_api.py` | 面板 API 客户端（自动处理 Host 头、Bearer 鉴权；也可当 CLI 用） |
-| `scripts/setup_base.sh` | 系统基线：时区、依赖、iptables 白名单、BBR（带 180 秒回滚保险） |
+| `scripts/setup_base.sh` | 系统基线：时区、依赖、iptables 白名单、屏蔽 IPv6、BBR（带 180 秒回滚保险） |
 | `scripts/install_3xui.sh` | 非交互安装面板 + ACME 证书 |
 | `scripts/deploy_nodes.py` | 创建 Reality / Hysteria2 / TUIC 入站（自动生成凭据） |
+| `scripts/fix_tuic_0rtt.py` | 关闭 TUIC 0-RTT，修复部分客户端认证失败（会先备份 inbound JSON） |
 | `scripts/merge_subscription.py` | 合并为一条订阅（一个客户端绑多入站） |
 | `scripts/verify_nodes.sh` | 端到端拨号验证（含 TUIC UDP relay 独立验证） |
 | `scripts/render_report.py` | 生成交付文档 `.md` / `.html`（数据全部实测回读） |
@@ -182,9 +222,10 @@ python scripts/render_report.py -o .
 cp examples/deploy.env.example deploy.env && $EDITOR deploy.env
 
 python scripts/ssh_run.py -c "cat /etc/os-release | head -3; uname -m"
-python scripts/ssh_run.py -f scripts/setup_base.sh
+python scripts/ssh_run.py -f scripts/setup_base.sh        # 含屏蔽 IPv6
 python scripts/ssh_run.py -f scripts/install_3xui.sh      # 记下 API_TOKEN 回填 deploy.env
 python scripts/deploy_nodes.py
+python scripts/fix_tuic_0rtt.py                           # 关掉 TUIC 0-RTT
 python scripts/merge_subscription.py
 python scripts/ssh_run.py -f scripts/verify_nodes.sh
 python scripts/render_report.py -o .

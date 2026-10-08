@@ -95,33 +95,87 @@ reality verification failed
 - 用 Xray-core 客户端连 → **成功** → 确认是服务端要求变了
 - 上游 issue：sing-box#4520、Xray#6477
 
-### 3.2 兼容性矩阵
+### 3.2 ⚠️ 根因二：Xray 内核**根本没有** TUIC / Hysteria2
+
+这是比 §3.1 更常见、也更容易被误判的一类问题。
+
+**Xray-core 从未实现 TUIC 协议**（也没有 Hysteria2）。在 Xray-core 源码里：
+
+```bash
+# 在 Xray 源码目录执行，确认不存在 tuic 协议实现
+grep -rn "tuic" infra/conf/ | wc -l        # → 0
+strings /usr/local/x-ui/bin/xray-linux-amd64 | grep -ci 'tuic'   # 只有 3x-ui 面板自己的字符串，与 Xray 无关
+```
+
+**因此**：用 Xray 内核的客户端导入 `tuic://` / `hysteria2://` 链接后，
+节点会一直**测速超时**，表现就是"连不上""登录不进去""识别不出来"。
+
+而 **v2rayN 与 v2rayNG 的默认内核恰恰都是 Xray**：
+
+| 客户端 | 能否切内核 | 结果 |
+|---|---|---|
+| **v2rayN (Windows)** | ✅ 可以切到 sing-box | 切完 TUIC / Hysteria2 就能用 |
+| **v2rayNG (Android)** | ❌ **没有内核切换** | TUIC / Hysteria2 **永久不可用**，只能用 REALITY |
+
+#### v2rayN 的正确配置（Windows）
+
+「设置 → 参数设置 → 默认内核类型」改为 **sing-box**（或 `Core 类型` 里按协议分别指定），
+保存后重启内核，再重新导入订阅。
+
+#### v2rayNG 用户的替代方案（Android）
+
+v2rayNG 只有 Xray 内核，无法使用 TUIC / Hysteria2。需要换客户端：
+
+- **NekoBox / NekoRay**（sing-box 内核）
+- **Hiddify**（sing-box 内核）
+- **Clash Meta for Android / ClashMetaForAndroid**（mihomo 内核）
+- **Karing**（sing-box 内核）
+
+或者**继续用 v2rayNG，但只用 REALITY 节点**（TCP 443）——三件套里 REALITY 是主力，
+这样也能正常上网，只是少了 QUIC 的低延迟优势。
+
+### 3.3 兼容性矩阵（合并两张表）
 
 | 客户端 | 内核 | REALITY 节点 | Hysteria2 | TUIC |
 |---|---|---|---|---|
-| v2rayN (Windows) | Xray | ✅ | ✅ | ✅ |
-| v2rayNG (Android) | Xray | ✅ | ✅ | ✅ |
+| **v2rayN 默认配置** | Xray | ✅ | ❌ | ❌ |
+| **v2rayN 切到 sing-box 内核** | sing-box | ❌ | ✅ | ✅ |
+| **v2rayNG (Android)** | Xray（无法切） | ✅ | ❌ | ❌ |
 | mihomo ≥ 1.19.30 | mihomo | ✅ | ✅ | ✅ |
-| Clash Verge Rev (新版) | mihomo | ✅ | ✅ | ✅ |
+| Clash Verge Rev / Clash Meta for Android | mihomo | ✅ | ✅ | ✅ |
 | **sing-box ≤ 1.15.0-alpha** | sing-box | ❌ | ✅ | ✅ |
-| **Hiddify** | sing-box | ❌ | ✅ | ✅ |
-| **Karing** | sing-box | ❌ | ✅ | ✅ |
+| **Hiddify / NekoBox / Karing** | sing-box | ❌ | ✅ | ✅ |
 | **Shadowrocket 2.2.92（旧版）** | 自研 | ❌ | ✅ | ✅ |
 | Shadowrocket 新版 | 自研 | ✅ | ✅ | ✅ |
+| **Surge / Stash** | 自研 | ✅ | ✅ | ✅ |
 
-**一句话结论**：sing-box 系客户端（Hiddify / Karing）和旧版 Shadowrocket
-**连不上 REALITY，但 Hysteria2 和 TUIC 完全正常**。
+**两句话结论**：
 
-### 3.3 给用户的建议话术
+1. **sing-box 系**（Hiddify / Karing / NekoBox）和旧版 Shadowrocket：
+   连不上 **REALITY**，但 Hysteria2 / TUIC 正常（§3.1）。
+2. **Xray 系**（v2rayN 默认 / v2rayNG）：
+   连不上 **Hysteria2 / TUIC**，但 REALITY 正常（§3.2）。
+3. **mihomo 系**（Clash Verge / Clash Meta）三个节点全部正常，**是最省心的选择**。
+
+> ⚠️ 交付时必须**同时**告知这两条，否则用户会在"REALITY 连不上"和
+> "TUIC 连不上"之间来回折腾，误以为是自己配置错了。
+
+### 3.4 给用户的建议话术
 
 交付文档里必须写清楚，否则用户会以为是自己配置错了：
 
-> 如果你的客户端是 **Hiddify / Karing / sing-box 系**或**旧版 Shadowrocket**，
-> 请**使用 Hysteria2 或 TUIC 节点**，不要用 REALITY 节点。
-> 这不是配置错误，是 Xray 26.9.8+ 新增的后量子密钥交换要求，
-> 客户端内核尚未跟进。v2rayN / v2rayNG / mihomo 系客户端三个节点都正常。
+> **用 Hiddify / Karing / sing-box 系或旧版 Shadowrocket**：
+> 请用 **Hysteria2 或 TUIC**，不要用 REALITY。这是 Xray 26.9.8+ 的后量子密钥交换要求，客户端内核尚未跟进。
+>
+> **用 v2rayN（Windows）**：到「设置 → 参数设置」把默认内核改成 **sing-box**，
+> 否则 TUIC / Hysteria2 永远连不上。
+>
+> **用 v2rayNG（Android）**：它只有 Xray 内核，**用不了 TUIC / Hysteria2**，
+> 请改用 NekoBox / Hiddify / Clash Meta for Android，或只用 REALITY 节点。
+>
+> **用 Clash Verge / Clash Meta（mihomo）**：三个节点都正常，无需任何调整。
 
-### 3.4 可选的降级方案
+### 3.5 可选的降级方案
 
 如果确实需要 sing-box 系客户端也能用 REALITY，可以**降级 Xray-core**：
 
@@ -135,15 +189,32 @@ reality verification failed
 
 ## 4. 排查"某客户端连不上"的流程
 
-1. **先确认是哪个节点**。如果只有 REALITY 不通、Hy2/TUIC 正常 → 十有八九是 §3.1
-2. **确认分享链接里的地址不是 `127.0.0.1`**（见 `xui-api.md` §5.1）
-3. **确认 `sni` 不为空**（见 `xui-api.md` §5.3）
-4. **确认 flow 字段在**：Reality+Vision 必须有 `flow=xtls-rprx-vision`，
+1. **先确认是哪个节点不通**，两种典型组合直接对应两个根因：
+   - 只有 **REALITY** 不通，Hy2/TUIC 正常 → **§3.1**（客户端内核缺后量子密钥交换，是 sing-box 系）
+   - 只有 **Hy2/TUIC** 不通，REALITY 正常 → **§3.2**（客户端是 Xray 内核，v2rayN 默认 / v2rayNG）
+2. **先看服务端日志再下结论**。3x-ui 的 TUIC 日志能直接区分"服务端问题"和"客户端问题"：
+
+   ```bash
+   journalctl -u x-ui --no-pager -n 500 | grep -iE "tuic|quic|auth"
+   # 看到 "tuic: inbound N (...): TCP relay started"  → 服务端正常，认证与转发都成功
+   # 看到 "client authentication rejected" / "authentication timed out" → 真的认证失败
+   ```
+
+   再看 UDP 包计数，判断客户端到底有没有把包发过来：
+
+   ```bash
+   iptables -t filter -L INPUT -v -n | grep 8443   # 命中数长期为 0 → 客户端根本没连过来
+   ```
+
+3. **确认分享链接里的地址不是 `127.0.0.1`**（见 `xui-api.md` §5.1）
+4. **确认 `sni` 不为空**（见 `xui-api.md` §5.3）
+5. **确认 flow 字段在**：Reality+Vision 必须有 `flow=xtls-rprx-vision`，
    合并订阅后容易丢（见 `xui-api.md` §4.4）
-5. **确认端口真的通**：UDP 端口要单独测（TCP 通不代表 UDP 通）
-6. **确认证书**：`openssl s_client -connect <域名>:443 -servername <域名>` 看有效期
-7. **换一个内核完全不同的客户端**交叉验证（Xray 系 vs sing-box 系），
-   这一步能最快区分"服务端问题"和"客户端内核问题"
+6. **确认端口真的通**：UDP 端口要单独测（TCP 通不代表 UDP 通）
+7. **确认证书**：`openssl s_client -connect <域名>:443 -servername <域名>` 看有效期
+8. **换一个内核完全不同的客户端**交叉验证（Xray 系 vs sing-box 系 vs mihomo 系），
+   这一步能最快区分"服务端问题"和"客户端内核问题"。
+   最快的三连测：Xray 客户端测 REALITY、sing-box 测 Hy2/TUIC、mihomo 测全部。
 
 ---
 
@@ -169,6 +240,9 @@ reality verification failed
 | 就要一套最稳的 | REALITY（主力）+ Hysteria2（备用） |
 | 网络丢包严重（跨境晚高峰、移动网） | Hysteria2 优先 |
 | 追求最低延迟（游戏、实时） | TUIC |
-| 客户端是 Hiddify / Karing / 旧 Shadowrocket | 只用 Hysteria2 + TUIC |
+| 客户端是 Hiddify / Karing / NekoBox / 旧 Shadowrocket | 只用 Hysteria2 + TUIC |
+| 客户端是 v2rayNG（Android，Xray 内核） | **只能 REALITY**；要用 TUIC/Hy2 得换客户端 |
+| 客户端是 v2rayN（Windows，Xray 内核） | 先切内核到 sing-box，再三个都用 |
+| 客户端是 Clash Verge / Clash Meta | 三个都能用，无需调整 |
 | UDP 被完全封锁的网络 | 只能 REALITY（TCP） |
 | 要接 CDN | VLESS + WS + TLS（本文三件套不适用） |

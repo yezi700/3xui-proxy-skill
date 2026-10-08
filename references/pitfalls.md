@@ -193,6 +193,89 @@ UDP 没有握手，`nc -z` 测不出来。可靠做法：
 用 Bash 工具启动后台进程再在**下一条命令**里测试，进程往往已经没了。
 **启动 + 测试 + 回收必须写在同一个脚本里**。
 
+### 4.4 代理出口是 IPv6，想强制只走 IPv4
+
+**现象**：节点全部连得上、能正常上网，但打开 IP 查询网站显示的是 VPS 的 **IPv6 地址**
+（形如 `2001:db8::1`），而不是 IPv4。某些服务对 IPv6 支持差，或需要固定 IPv4 出口。
+
+**根因**：3x-ui 生成的 Xray 配置里是
+
+```json
+"routing": { "domainStrategy": "AsIs" }
+```
+
+`AsIs` 表示**把域名原样交给操作系统解析**。VPS 默认同时有 IPv4 和 IPv6，
+glibc 的 `getaddrinfo` 按 RFC 6724 优先返回 IPv6（AAAA），于是出站走了 IPv6。
+
+⚠️ 这**与入站无关**。域名本身通常没有 AAAA 记录，客户端连的确实是 IPv4；
+是 **Xray 的出站**选了 IPv6。不要往"客户端解析错了"的方向排查。
+
+**排查**：
+
+```bash
+# 1. 系统确实有可用 IPv6
+ip -6 addr show scope global | grep inet6
+curl -6 -s -o /dev/null -w "%{http_code}\n" https://www.cloudflare.com/cdn-cgi/trace   # 200 → IPv6 通
+# 2. Xray 用的是系统解析器（dns 段为空 → 确认没有自带 DNS 在解析）
+python3 -c "import json;print(json.load(open('/usr/local/x-ui/bin/config.json')).get('dns'))"
+# 3. 域名本身没有 AAAA（排除"客户端连了 IPv6"这条岔路）
+curl -s -H 'accept: application/dns-json' "https://1.1.1.1/dns-query?name=$DOMAIN&type=AAAA"
+```
+
+**修复（推荐：系统层屏蔽 IPv6）**
+
+⚠️ **先改 DNS！** 很多 VPS 的 `/etc/resolv.conf` 里混着 IPv6 nameserver
+（如 `2001:4860:4860::8888`），直接关 IPv6 会让解析器去尝试不可达的服务器，
+拖慢甚至中断 DNS：
+
+```bash
+cp -a /etc/resolv.conf /root/resolv.conf.bak
+cat > /etc/resolv.conf <<'EOF'
+nameserver 8.8.8.8
+nameserver 8.8.4.4
+nameserver 1.1.1.1
+EOF
+```
+
+再关 IPv6：
+
+```bash
+cat > /etc/sysctl.d/99-disable-ipv6.conf <<'EOF'
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+net.ipv6.conf.lo.disable_ipv6 = 1
+EOF
+sysctl --system
+ip -6 addr show dev eth0 scope global | grep inet6   # 应无输出
+```
+
+顺手收紧 ip6tables（纵深防御，防止将来有人误开 IPv6）：
+
+```bash
+ip6tables -F INPUT
+ip6tables -P INPUT DROP
+ip6tables -A INPUT -i lo -j ACCEPT
+ip6tables -A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+ip6tables -A INPUT -p ipv6-icmp -j ACCEPT
+netfilter-persistent save
+```
+
+**验证**：`curl -6` 应失败、`curl -4` 正常；再用真实客户端拨号，
+访问 `https://ipinfo.io/ip` 应返回 IPv4。
+
+**回滚**：
+
+```bash
+rm -f /etc/sysctl.d/99-disable-ipv6.conf && sysctl --system
+chattr -i /etc/resolv.conf 2>/dev/null
+cp -a /root/resolv.conf.bak /etc/resolv.conf
+```
+
+> 若只想"代理出口走 IPv4、保留服务器 IPv6"，理论上可改 Xray 的
+> `sockopt.domainStrategy: ForceIPv4`。但 **3x-ui v3.9.0 不再把 `xrayTemplateConfig`
+> 存进数据库**（`settings` 表里已无该键），模板是硬编码的，改起来远比关系统 IPv6 麻烦，
+> **不推荐**。
+
 ---
 
 ## 五、SSH 自动化
@@ -241,6 +324,69 @@ Windows 的 Git Bash 通常没有 `jq`。本地 JSON 处理一律用 Python；`j
 教程常说"最小客户端版本必须填 1.0.0，否则小火箭用不了"。
 实测：填与不填对 Xray 客户端都正常，对 sing-box 客户端**都没用**（那是另一个原因）。
 填 `1.0.0` 是安全的最小值（只会拒绝声明版本 < 1.0.0 的客户端），可以保留，但不要指望它解决兼容性问题。
+
+### 6.3 TUIC 服务端开了 0-RTT，客户端会认证失败
+
+**现象**：TUIC 节点时通时不通——首次连接往往成功，重连 / 切换节点后失败。
+服务端日志出现 `client authentication rejected`，或客户端报 `tuic: authentication failed`。
+
+**根因**：3x-ui 的 TUIC 认证依赖 **TLS Keying Material Exporter**，
+而 `internal/tuic/auth.go` 里有一道硬性检查：
+
+```go
+if !cs.HandshakeComplete {
+    return nil, ErrInvalidTLSState
+}
+```
+
+**0-RTT 连接在认证时 TLS 握手尚未完成**，`HandshakeComplete == false`，
+认证被直接拒绝，连接以 `0x100` 关闭。
+
+服务端 `settings.server.zero_rtt_handshake: true` 时 `quic.Config.Allow0RTT = true`，
+于是客户端一旦启用 0-RTT 就会踩中——包括 mihomo 的 `reduce-rtt: true`、
+sing-box 的 `zero_rtt_handshake: true`，以及**面板自己导出的 Clash 配置**
+（`tuicConfig.ts` 里 `reduceRtt = tuicServer?.zero_rtt_handshake ?? true`，默认就是 true）。
+
+**修复**：把 TUIC 入站的 `zero_rtt_handshake` 改成 `false`。
+
+```bash
+python scripts/fix_tuic_0rtt.py     # 会自动备份原 inbound JSON 再改
+```
+
+⚠️ `inbounds/update/:id` 是**整对象覆盖**，必须提交 `get` 拿到的完整入站对象，只改目标字段。
+
+**实测**（mihomo v1.19.32）：修复前 `reduce-rtt: true` 会失败；
+修复后 `reduce-rtt: false` 与 `true` 两种配置全部正常（出口 IPv4、YouTube/Google 均 200）。
+
+### 6.4 客户端是 Xray 内核时，TUIC / Hysteria2 永远连不上
+
+**现象**：v2rayN / v2rayNG 导入 `tuic://`、`hysteria2://` 链接后一直测速超时，
+界面显示"识别不出来"或节点永远不可用。
+
+**根因**：**Xray-core 根本没有实现 TUIC，也没有 Hysteria2。**
+而 v2rayN 与 v2rayNG 的**默认内核都是 Xray**。
+
+```bash
+strings /usr/local/x-ui/bin/xray-linux-amd64 | grep -ci tuic   # 命中的只是面板自带字符串，与 Xray 无关
+# Xray 源码里确认：
+grep -rn "tuic" <xray-source>/infra/conf/ | wc -l              # → 0
+```
+
+**修复**：
+
+- **v2rayN（Windows）**：「设置 → 参数设置」把默认内核类型改为 **sing-box**，
+  保存后重启内核，再重新导入订阅。
+- **v2rayNG（Android）**：**没有内核切换**，TUIC / Hysteria2 不可用。
+  改用 NekoBox / Hiddify / Karing（sing-box 系）或 Clash Meta for Android（mihomo 系）；
+  若坚持用 v2rayNG，**只能使用 REALITY 节点**。
+
+**先看日志再下结论**：服务端日志出现 `TCP relay started` 就说明服务端完全正常，
+问题在客户端内核，**不要再去改服务端配置**。判断命令：
+
+```bash
+journalctl -u x-ui --no-pager -n 500 | grep -iE "tuic|auth"
+iptables -t filter -L INPUT -v -n | grep 8443     # 命中数持续增长 → 包确实到了，服务端没问题
+```
 
 ---
 

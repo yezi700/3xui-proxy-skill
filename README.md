@@ -20,6 +20,9 @@
 | 三个节点只有三条订阅 | 用「一个客户端绑定多入站」合并为一条 |
 | 在服务器上自测"通了"，但外面连不上 | VPS 访问自身公网 IP 走 `lo`，绕过 INPUT 链 —— 必须从外部验证 |
 | 某客户端连不上 REALITY | 已知的 Xray ≥26.9.8 破坏性变更，文档给出完整兼容性矩阵 |
+| 代理**出口 IP 是 IPv6**，但需要固定 IPv4 出口 | 根因是 Xray `domainStrategy=AsIs` + 系统有 IPv6；`setup_base.sh` 可一键屏蔽 IPv6（**先换 DNS 再关**，带断网自动回滚） |
+| TUIC 节点**时通时不通**，重连就失败 | 3x-ui TUIC 认证要求 `HandshakeComplete`，0-RTT 连接必然认证失败；`fix_tuic_0rtt.py` 一键关闭 0-RTT |
+| **v2rayN / v2rayNG 导入 TUIC 后一直测速超时** | **Xray 内核根本没有 TUIC/Hysteria2**。v2rayN 切 sing-box 内核即可；v2rayNG 无内核切换，只能用 REALITY |
 
 ## 安装
 
@@ -79,15 +82,28 @@ skill 会自动按 Step 0→8 执行：探测环境 → 系统基线 → 装面�
 ├── scripts/
 │   ├── ssh_run.py                        # SSH 执行器
 │   ├── xui_api.py                        # 面板 API 客户端
-│   ├── setup_base.sh                     # 系统基线
+│   ├── setup_base.sh                     # 系统基线（含屏蔽 IPv6）
 │   ├── install_3xui.sh                   # 安装面板 + 证书
 │   ├── deploy_nodes.py                   # 建 3 个节点
+│   ├── fix_tuic_0rtt.py                  # 关闭 TUIC 0-RTT
 │   ├── merge_subscription.py             # 合并订阅
 │   ├── verify_nodes.sh                   # 端到端验证
 │   └── render_report.py                  # 生成交付文档
 └── examples/
     └── deploy.env.example                # 参数模板
 ```
+
+## 客户端兼容性速查
+
+两条"连不上"的根因完全不同，别搞混：
+
+| 客户端内核 | REALITY | Hysteria2 | TUIC | 怎么办 |
+|---|---|---|---|---|
+| **Xray**（v2rayN 默认 / v2rayNG） | ✅ | ❌ | ❌ | v2rayN 切 sing-box 内核；v2rayNG 只能用 REALITY |
+| **sing-box**（Hiddify / Karing / NekoBox / 旧 Shadowrocket） | ❌ | ✅ | ✅ | 用 Hy2 / TUIC |
+| **mihomo**（Clash Verge / Clash Meta） | ✅ | ✅ | ✅ | 无需调整，最省心 |
+
+详见 `references/protocols-and-clients.md`。
 
 ## 发布与更新
 
