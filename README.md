@@ -1,13 +1,33 @@
 # 3xui-proxy-skill
 
-`https://github.com/yezi700/3xui-proxy-skill`
+一个通用的 **Agent Skill**（`SKILL.md` 约定）：把一台全新的 Linux VPS 变成一套可用的代理服务
+—— 3x-ui 管理面板 + 三种互补的抗封锁协议节点（VLESS-REALITY / Hysteria2 / TUIC v5），
+并输出可直接导入客户端的分享链接与订阅地址。
 
-一个 WorkBuddy / Claude **Agent Skill**：把一台全新的 Linux VPS 变成一套可用的代理服务
-（3x-ui 面板 + VLESS-REALITY / Hysteria2 / TUIC v5 三协议节点），
-并输出可直接导入客户端的链接与订阅。
+> 这不是又一个"复制粘贴命令"的教程。
+> 它把**真实部署中踩到的几十个坑**（系统版本差异、面板 API 陷阱、机房端口封锁、
+> gRPC 热更新陷阱、客户端内核破坏性变更）固化成了可复用的流程与脚本。
 
-> 这不是又一个"复制粘贴命令"的教程。它把**真实部署中踩到的几十个坑**（系统版本差异、API 陷阱、
-> 机房端口封锁、gRPC 热更新陷阱、客户端兼容性破坏性变更）固化成了可复用的流程与脚本。
+**三件套为什么是这三个**：REALITY 走 TCP 443，UDP 被封锁时是唯一活路；
+Hysteria2 走 UDP 443 + 端口跳跃，高丢包链路吞吐最强；TUIC 走 UDP 8443，建连最快。
+三者互补，客户端按网络情况切换。
+
+---
+
+## 目录
+
+- [它能解决什么](#它能解决什么)
+- [安装](#安装)
+- [快速开始](#快速开始)
+- [使用](#使用)
+- [客户端兼容性速查](#客户端兼容性速查)
+- [目录结构](#目录结构)
+- [依赖](#依赖)
+- [开发与验证](#开发与验证)
+- [安全说明](#安全说明)
+- [版本历史](#版本历史)
+
+---
 
 ## 它能解决什么
 
@@ -32,30 +52,53 @@
 | Windows 上 `git clone` 后 `.sh` 脚本报 `$'\r': command not found` | Git 的 `core.autocrlf` 把脚本换成了 CRLF。仓库已加 `.gitattributes` 强制 `*.sh`/`*.py` 用 LF |
 | 测新代理**时通时不通**，以为服务端不稳 | 本机开着的代理客户端会截胡 `curl -x`。先用 TCP 裸探测（`/dev/tcp`）连续验证再下结论 |
 
+完整的「现象 → 根因 → 修复」见 [`references/pitfalls.md`](references/pitfalls.md)。
+
+---
+
 ## 安装
 
-### 方式一：克隆到 skill 目录（最简单）
+本仓库遵循 **Agent Skills** 约定：根目录一份 `SKILL.md`（YAML frontmatter + Markdown 正文），
+配套 `scripts/`（可执行脚本）与 `references/`（按需加载的参考文档）。
+**任何支持该约定的 agent 运行时都能直接加载，不需要额外适配。**
+
+把仓库克隆到你所用的运行时的 skills 目录即可（把 `<skills-dir>` 换成实际路径）：
 
 ```bash
 git clone https://github.com/yezi700/3xui-proxy-skill.git \
-  ~/.workbuddy-ai/skills/3xui-proxy-skill
+  <skills-dir>/3xui-proxy-skill
 ```
 
-Windows：
+不同运行时的 skills 目录位置不一（常见形态是 `~/.<runtime>/skills/` 或
+`~/.config/<runtime>/skills/`），**以你所用的运行时文档为准** —— 只要该运行时支持
+`SKILL.md` 约定，放进它的 skills 目录就能被识别。
+
+Windows（PowerShell）：
 
 ```powershell
 git clone https://github.com/yezi700/3xui-proxy-skill.git `
-  "$env:USERPROFILE\.workbuddy-ai\skills\3xui-proxy-skill"
+  "<skills-dir>\3xui-proxy-skill"
 ```
 
-重启会话后生效。WorkBuddy 会在识别到"部署代理节点"类请求时自动加载。
+放好后重开会话即可。运行时会读取 `SKILL.md` 的 `description`，
+在识别到"部署代理节点"类请求时自动加载。
 
-> ⚠️ **Windows 用户**：仓库根目录有 `.gitattributes`，已强制 `*.sh` / `*.py` 使用 LF 换行，
-> 克隆后脚本可以直接传到 Linux 执行。如果你的 Git 全局设置了 `core.autocrlf=true`
-> 且克隆的是**旧版本**，请先 `git pull` 拉取 `.gitattributes`，或参考
-> `references/pitfalls.md` §1.5 就地转换。
+> 也支持把本仓库作为**普通目录**分发：拷贝整个文件夹到 skills 目录同样生效，
+> 不依赖任何特定的安装器或包管理器。
 
-### 方式二：打包分发
+### 不想装成 skill？直接当脚本用也行
+
+`scripts/` 下都是独立的命令行工具，不依赖 agent 运行时：
+
+```bash
+pip install paramiko                      # 唯一的外部依赖
+
+cp examples/deploy.env.example deploy.env && $EDITOR deploy.env
+python scripts/check_dns.py --domain jp.example.com --ipv4 203.0.113.10
+python scripts/ssh_run.py -f scripts/setup_base.sh
+```
+
+### 打包分发
 
 ```bash
 # 只打包 git 已跟踪的文件（不会带入 .git / __pycache__ / deploy.env）
@@ -63,14 +106,19 @@ git archive --format=zip --prefix=3xui-proxy-skill/ \
   -o ../3xui-proxy-skill.zip HEAD
 ```
 
-生成 `3xui-proxy-skill.zip`，对方解压到 skills 目录即可。
+> ⚠️ **Windows 用户**：仓库根目录的 `.gitattributes` 已强制 `*.sh` / `*.py` 使用 LF 换行，
+> 克隆后脚本可以直接传到 Linux 执行。若你的 Git 全局设了 `core.autocrlf=true`
+> 且克隆的是旧版本，先 `git pull` 拉取 `.gitattributes`，
+> 或参考 [`references/pitfalls.md`](references/pitfalls.md) §1.5 就地转换。
 
-> 也可以直接用 skill-creator 的 `package_skill.py`，但它**不过滤 `.git` 与 `__pycache__`**，
-> 建议在干净的检出目录上执行，或改用上面的 `git archive`。
+---
 
-## 第一次部署：先准备域名
+## 快速开始
 
-还没有域名或不会解析？先看 [域名申请、Cloudflare 接入与 DNS 引导](references/domain-and-dns.md)：
+### 第 0 步：先准备域名
+
+还没有域名或不会解析？先看
+[域名申请、Cloudflare 接入与 DNS 引导](references/domain-and-dns.md)：
 申请免费域名 → 注册 Cloudflare（可选）→ 修改 NS → 添加指向 VPS 的 A 记录（灰云）→ DNS 预检。
 已有可用域名时直接检查解析，无需重新注册或迁移 DNS。
 
@@ -82,46 +130,51 @@ python scripts/check_dns.py --domain jp.example.com --ipv4 203.0.113.10
 预检仅使用 Python 标准库，无需凭据，不改 DNS；默认要求没有 AAAA。
 免费域名可能需要续期，实际规则以服务商说明为准。
 
+### 第 1 步：填参数
+
+```bash
+cp examples/deploy.env.example deploy.env
+$EDITOR deploy.env
+```
+
+`deploy.env` 是**唯一**的配置入口，所有脚本都从这里（或同名环境变量）读取。
+它已在 `.gitignore` 中排除 —— **里面有明文凭据，不要提交、不要外传**。
+
+### 第 2 步：按顺序跑
+
+```bash
+python scripts/ssh_run.py -c "cat /etc/os-release | head -3; uname -m"
+python scripts/ssh_run.py -f scripts/setup_base.sh        # 系统基线 + 屏蔽 IPv6
+python scripts/ssh_run.py -f scripts/install_3xui.sh      # 装面板 + 证书，记下 API_TOKEN
+python scripts/deploy_nodes.py                            # 建 3 个节点
+python scripts/fix_tuic_0rtt.py                           # 关闭 TUIC 0-RTT
+python scripts/merge_subscription.py                      # 合并成一条订阅
+python scripts/ssh_run.py -f scripts/verify_nodes.sh      # 端到端拨号验证
+python scripts/render_report.py -o .                      # 生成交付文档
+```
+
+> `install_3xui.sh` 会打印 **API Token**，把它回填到 `deploy.env` 的 `API_TOKEN` 再继续。
+> 该 Token 在 3x-ui v3.9.0 里**只在创建时返回一次**（库里只存 SHA-256），务必立即保存。
+
+---
+
 ## 使用
 
-在对话里直接说需求即可，例如：
+装成 skill 后，在对话里直接说需求即可：
 
-> 帮我在这台 VPS 上部署 3x-ui 和 Reality / Hysteria2 节点：`1.2.3.4` `22` `root` `密码`，域名 `jp.example.com` 已解析
+> 帮我在这台 VPS 上部署 3x-ui 和 Reality / Hysteria2 节点：`1.2.3.4` `22` `root` `密码`，
+> 域名 `jp.example.com` 已解析
 
-skill 会先按需引导域名准备与 DNS 预检，再按 Step 0→8 执行：探测环境 → 系统基线 → 装面板+证书 → 建节点 → 合并订阅 →
-放行端口 → 端到端验证 → 生成交付文档。
+skill 会先按需引导域名准备与 DNS 预检，再按 Step 0→8 执行：
+探测环境 → 系统基线 → 装面板 + 证书 → 建节点 → 合并订阅 → 放行端口 → 端到端验证 → 生成交付文档。
 
-也可以只调用其中一步，例如"给这个面板再加一个 TUIC 节点"。
+也可以只调用其中一步，例如"给这个面板再加一个 TUIC 节点"、
+"这个客户端连不上 TUIC，帮我看看"。
 
-## 目录结构
+**不适用**：客户端软件的界面操作（v2rayN / Shadowrocket 怎么点）、
+纯 DNS 分流规则、商业机场选购。
 
-```
-3xui-proxy-skill/
-├── SKILL.md                              # 主流程（agent 入口）
-├── README.md
-├── LICENSE
-├── .gitignore
-├── .gitattributes                        # 强制 .sh/.py 用 LF（Windows 克隆不踩 CRLF 坑）
-├── references/
-│   ├── domain-and-dns.md                 # 免费域名、Cloudflare、A/AAAA 与预检
-│   ├── pitfalls.md                       # 踩坑大全（核心价值）
-│   ├── xui-api.md                        # 3x-ui API 备忘
-│   ├── protocols-and-clients.md          # 协议选型 + 客户端兼容性矩阵
-│   └── install-env.md                    # 非交互安装参数
-├── scripts/
-│   ├── check_dns.py                      # 只读 DNS 预检（标准库）
-│   ├── ssh_run.py                        # SSH 执行器
-│   ├── xui_api.py                        # 面板 API 客户端
-│   ├── setup_base.sh                     # 系统基线（含屏蔽 IPv6）
-│   ├── install_3xui.sh                   # 安装面板 + 证书 + 获取 API Token
-│   ├── deploy_nodes.py                   # 建 3 个节点
-│   ├── fix_tuic_0rtt.py                  # 关闭 TUIC 0-RTT
-│   ├── merge_subscription.py             # 合并订阅
-│   ├── verify_nodes.sh                   # 端到端验证
-│   └── render_report.py                  # 生成交付文档
-└── examples/
-    └── deploy.env.example                # 参数模板
-```
+---
 
 ## 客户端兼容性速查
 
@@ -133,66 +186,58 @@ skill 会先按需引导域名准备与 DNS 预检，再按 Step 0→8 执行：
 | **sing-box**（Hiddify / Karing / NekoBox / 旧 Shadowrocket） | ❌ | ✅ | ✅ | 用 Hy2 / TUIC |
 | **mihomo**（Clash Verge / Clash Meta） | ✅ | ✅ | ✅ | 无需调整，最省心 |
 
-详见 `references/protocols-and-clients.md`。
+- **sing-box 系连不上 REALITY**：Xray-core ≥ 26.9.8 起 REALITY 要求客户端
+  ClientHello 携带 `X25519MLKEM768`（后量子混合密钥交换）。
+- **Xray 系连不上 Hysteria2 / TUIC**：Xray-core **根本没有实现**这两个协议。
 
-## 发布与更新
+详见 [`references/protocols-and-clients.md`](references/protocols-and-clients.md)。
 
-仓库地址：**https://github.com/yezi700/3xui-proxy-skill**
+---
 
-### 首次发布（已完成，留作参考）
+## 目录结构
 
-```bash
-git config user.name  "yezi700"
-git config user.email "你的邮箱@example.com"
-git add .
-git commit -m "feat: 3x-ui 代理节点部署 skill（Reality / Hysteria2 / TUIC）"
-
-gh auth login                       # 首次需要
-gh repo create 3xui-proxy-skill --public --source=. --push
+```
+3xui-proxy-skill/
+├── SKILL.md                              # 主流程（agent 入口）
+├── README.md
+├── LICENSE
+├── .gitignore
+├── .gitattributes                        # 强制 .sh/.py 用 LF（Windows 克隆不踩 CRLF 坑）
+├── references/                           # 按需加载，不要一次性全读
+│   ├── domain-and-dns.md                 # 免费域名、Cloudflare、A/AAAA 与预检
+│   ├── pitfalls.md                       # 踩坑大全（核心价值，每次部署都该扫一遍）
+│   ├── xui-api.md                        # 3x-ui API 备忘（鉴权、字段、客户端模型）
+│   ├── protocols-and-clients.md          # 协议选型 + 客户端兼容性矩阵
+│   └── install-env.md                    # 3x-ui 非交互安装参数
+├── scripts/
+│   ├── check_dns.py                      # 只读 DNS 预检（仅标准库）
+│   ├── ssh_run.py                        # 通用 SSH 执行器
+│   ├── xui_api.py                        # 面板 API 客户端（也可当 CLI 用）
+│   ├── setup_base.sh                     # 系统基线：时区/依赖/iptables/屏蔽 IPv6/BBR
+│   ├── install_3xui.sh                   # 安装面板 + ACME 证书 + 获取 API Token
+│   ├── deploy_nodes.py                   # 创建 Reality / Hysteria2 / TUIC 入站
+│   ├── fix_tuic_0rtt.py                  # 关闭 TUIC 0-RTT（会先备份）
+│   ├── merge_subscription.py             # 合并为一条订阅（一个客户端绑多入站）
+│   ├── verify_nodes.sh                   # 端到端拨号验证（含 TUIC UDP relay 验证）
+│   └── render_report.py                  # 生成交付文档 .md / .html
+└── examples/
+    └── deploy.env.example                # 参数模板
 ```
 
-或手动：
-
-```bash
-# 先在 github.com 上建一个空仓库（不要勾选 README / .gitignore / LICENSE）
-git remote add origin https://github.com/yezi700/3xui-proxy-skill.git
-git push -u origin main
-```
-
-### 日常更新
-
-```bash
-git add .
-git commit -m "docs: 补充 XXX"
-git push
-```
-
-> ⚠️ **每次提交前确认 `deploy.env` 没被加进去**：
-> ```bash
-> git ls-files | grep deploy.env          # 只应看到 deploy.env.example
-> ```
-> `.gitignore` 已排除 `deploy.env` / `VPS-*.md` / `VPS-*.html` / `node-credentials.json`，
-> 但**凭据一旦推到公开仓库，即使删除也会留在历史里**。
-
-### 打包分发
-
-```bash
-git archive --format=zip --prefix=3xui-proxy-skill/ \
-  -o ../3xui-proxy-skill.zip HEAD
-```
-
-对方解压到 `~/.workbuddy-ai/skills/` 即可。仓库根已有
-`.codebuddy-plugin/plugin.json`，因此也可作为插件分发。
+---
 
 ## 依赖
 
-- **本地**：Python 3.8+（`paramiko`）、`bash`、可选 `git`
-- **VPS**：Debian 11+ / Ubuntu 20.04+（x86_64 或 arm64），root 权限，能访问 GitHub 与 Let's Encrypt
-- 不需要本地安装 Xray / 3x-ui
+- **本地**：Python 3.8+、`bash`、可选 `git`
+- **VPS**：Debian 11+ / Ubuntu 20.04+（x86_64 或 arm64），root 权限，
+  能访问 GitHub 与 Let's Encrypt
+- 不需要在本地安装 Xray / 3x-ui
 
 ```bash
-pip install paramiko
+pip install paramiko        # 唯一的外部 Python 依赖
 ```
+
+---
 
 ## 开发与验证
 
@@ -202,49 +247,63 @@ python -m unittest discover -s tests -v
 python -m compileall -q scripts tests
 ```
 
-测试在本地模拟 SSH 与面板响应，不连接真实 VPS。Bash 行为测试在 Linux/macOS
-使用 `bash`，Windows 使用 Git for Windows 的 Bash；未安装时会跳过对应测试。
-建议在 Linux CI 中对 Python 3.8 / 3.11 / 3.13 运行上述完整测试。
+测试在本地模拟 SSH 与面板响应，**不连接真实 VPS、不访问网络**。
+Bash 行为测试在 Linux/macOS 使用系统 `bash`，Windows 使用 Git for Windows 的 Bash；
+未安装时会跳过对应测试。建议在 Linux CI 中对 Python 3.8 / 3.11 / 3.13 运行上述完整测试。
 
-部署入口：`deploy_nodes.py`、`merge_subscription.py` 在本地直接用 Python 运行，
-它们内部负责 SSH 编排；`ssh_run.py -f` 仅用于 `.sh` 脚本。
-部署和合并遇到失败会停止并返回非零状态；停止不等于自动回滚，重试前应回读已有入站。
-合并仅选择配置端口对应的三个入站，并保留原客户端；从外部验证新订阅后再按需清理旧身份。
-新建 TUIC 已默认关闭 0-RTT，`fix_tuic_0rtt.py` 用于修复旧入站。
+几点设计约束：
+
+- 部署入口 `deploy_nodes.py`、`merge_subscription.py` 在本地用 Python 直接运行，
+  SSH 编排在内部完成；`ssh_run.py -f` 只用于 `.sh` 脚本。
+- 部署与合并遇到失败会**停止并返回非零状态**；停止不等于自动回滚，
+  重试前应先回读已有入站。
+- 合并只选择配置端口对应的三个入站，并**保留原客户端**；
+  从外部验证新订阅可用后，再按需清理旧身份。
+- 新建 TUIC 默认关闭 0-RTT；`fix_tuic_0rtt.py` 用于修复早期版本建的入站。
+- 改动入站后**必须 `systemctl restart x-ui`** —— v3.9.0 走 gRPC 热更新，
+  不重启就不会重写 `bin/config.json`（见 `pitfalls.md` §2.6）。
+
+---
 
 ## 安全说明
 
-- 脚本会以 root 身份在你的 VPS 上执行命令（安装软件、改防火墙、写 systemd 服务）——
+- 脚本会以 **root** 身份在你的 VPS 上执行命令（装软件、改防火墙、写 systemd 服务）——
   执行前请自行审阅 `scripts/` 下所有文件。
 - `deploy.env` 含明文凭据，**已在 `.gitignore` 中排除**，请勿提交。
+  同理，`render_report.py` 生成的 `VPS-*.md` / `.html` 也含明文凭据，同样被忽略。
 - 建议部署完成后在面板里修改默认用户名与密码。
+- 只在你**拥有或获授权管理**的服务器上使用本仓库。
+
+---
 
 ## 版本历史
 
+### v1.3.1
+
+- **去厂商化**：移除仓库里所有特定运行时的品牌字样与专属文件，本仓库现在是一个
+  纯通用 skill —— 只依赖公开的 **Agent Skills**（`SKILL.md`）约定，
+  任何支持该约定的运行时都能直接加载。
+- **重写自述文件**：新增目录、运行时中立的安装说明（含"不想装成 skill，直接当脚本用"
+  的降级路径）、快速开始的完整命令序列，并把踩坑清单按"现象 → 根因 → 修复"重新组织。
+- 新增 `.gitattributes` 说明与打包分发（`git archive`）示例。
+
 ### v1.3.0
 
-基于一次真实的 VPS 部署复盘做的收敛与加固：
-
-- **移除 HTTP / SOCKS5 通用代理支持** —— 删除 `scripts/add_http_socks.py` 及
-  SKILL / README / references / `deploy.env.example` 中的全部相关内容。
-  本 skill 聚焦 REALITY / Hysteria2 / TUIC 三件套。
-- **修 `install_3xui.sh` 的 API Token 读取**：v3.9.0 起 `api_tokens` 表只存 SHA-256，
-  老的 `sqlite3 ... where key='apiToken'` 返回空。改用
-  CSRF → 登录 → `POST /panel/api/setting/apiTokens/create` 流程。
-- **修 `settings` / `streamSettings` 的类型假设**：写的时候必须是 JSON 字符串，
-  但部分版本的**读**接口直接返回对象，`json.loads(dict)` 会抛 `TypeError`。
-  `deploy_nodes.py` / `verify_nodes.sh` 已改为两种都兼容。
-- **修 `verify_nodes.sh` 的 REALITY 自检**：原来先写客户端配置、后回读公钥，
-  导致 `publicKey` 为空、握手必然失败。现在改成**先回读再写配置**。
-- **修 `render_report.py` 的兼容性矩阵**：原表把 Xray 内核写成三个节点全可用，
-  与实际相反（Xray 无 TUIC / Hysteria2）。交付文档的矩阵已按真实情况重写。
-- **`merge_subscription.py` 的 flow 回读更健壮**：`/clients/get/<email>` 在不同版本
-  返回结构不一致，现在同时查 `/clients/list` 兜底。
-- **新增 6 个坑**：gRPC 热更新不重写 `bin/config.json`（端口冲突定时炸弹）、
-  TUIC v5 由 `x-ui` 面板进程承载、AnyTLS 不受支持、
-  Debian 默认没装 `strings`（假阴性陷阱）、Windows 克隆的 CRLF 问题、
-  清理临时方案时的残留清单。
-- **新增 `.gitattributes`** 强制脚本 LF；`setup_base.sh` 补装 `python3`。
+- **收敛范围**：移除 HTTP / SOCKS5 通用代理支持（删除 `scripts/add_http_socks.py`
+  及各处相关内容），聚焦 REALITY / Hysteria2 / TUIC 三件套。
+- **修 3x-ui v3.9.0 兼容性问题**：
+  - `install_3xui.sh` 的 API Token 读取（v3.9.0 只存 SHA-256，
+    `sqlite3 ... key='apiToken'` 返回空）→ 改用 CSRF → 登录 → `apiTokens/create`。
+  - `settings` / `streamSettings` 的读写类型不一致（写要字符串、读返回对象），
+    `deploy_nodes.py` / `verify_nodes.sh` 改为两种都兼容。
+  - `verify_nodes.sh` 的 REALITY 自检顺序错误（先写配置后回读公钥 → 公钥为空），
+    改为**先回读再写配置**。
+  - `render_report.py` 的兼容性矩阵写反了（Xray 内核被写成三节点全可用），已按真实情况重写。
+  - `merge_subscription.py` 的 flow 回读增加 `/clients/list` 兜底。
+- **新增 8 个坑**：gRPC 热更新不重写 `bin/config.json`、TUIC v5 由面板进程承载、
+  AnyTLS 不受支持、Debian 没装 `strings` 导致假阴性、Windows 克隆的 CRLF、
+  清理残留的清单、3x-ui 自带无用文件等。
+- 新增 `.gitattributes` 强制脚本 LF；`setup_base.sh` 补装 `python3`。
 
 ### v1.2.0
 
@@ -257,6 +316,8 @@ python -m compileall -q scripts tests
 ### v1.0.0
 
 首个版本：3x-ui + VLESS-REALITY / Hysteria2 / TUIC v5 全流程。
+
+---
 
 ## 许可
 

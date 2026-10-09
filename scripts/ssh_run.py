@@ -16,8 +16,8 @@
     pip install paramiko
 
 ⚠️ 关于 Python 解释器
-    若 WorkBuddy 自带的 Python 没装 paramiko，用系统 Python：
-    C:/Users/<你>/AppData/Local/Programs/Python/Python311/python.exe
+    本脚本只用标准库 + paramiko，任何 Python 3.8+ 解释器都能跑。
+    若当前解释器没装 paramiko，换一个装了 paramiko 的解释器运行即可。
 """
 from __future__ import annotations
 
