@@ -57,6 +57,58 @@ sysctl net.ipv4.tcp_congestion_control   # 应输出 bbr
 教程往往写"当时最新版"。**永远装当前最新稳定版**，并在交付文档里写明版本差异。
 3x-ui 的版本直接决定了入站字段结构（例如 v3.9.0 才原生支持 TUIC）。
 
+### 1.4 ⚠️ Debian 默认没装 `strings`，协议探测会得到"全是 0"的假阴性
+
+**现象**：想用 `strings <二进制> | grep -c tuic` 判断某个协议是否被支持，
+结果**所有协议都是 0 命中** —— 连明明在跑的 `vless` / `vmess` 也是 0。
+
+**根因**：`strings` 属于 `binutils` 包，**Debian 默认不安装**。
+命令不存在时 shell 报 `command not found` 到 stderr，而 stdout 为空，
+`| grep -c` 拿到 0 —— 看起来就像"这个字符串真的不存在"。
+
+这个坑非常危险：它会让"不支持 TUIC"和"支持 TUIC"得出同一个结论，
+从而把人引向完全错误的排查方向。
+
+**修复**：先确认工具在不在，再换用 `grep -a`：
+
+```bash
+command -v strings || echo "(strings 未安装，改用 grep -a)"
+
+# 正确姿势：-a 把二进制当文本处理，-o 只输出匹配片段，-i 忽略大小写
+for k in vless vmess trojan hysteria tuic anytls; do
+  n="$(grep -a -o -i -- "$k" /usr/local/x-ui/bin/xray-linux-amd64 | wc -l)"
+  echo "$k = $n"
+done
+```
+
+> 顺手可以装：`apt-get install -y binutils`。但脚本里别依赖它，
+> 用 `grep -a` 更稳（`grep` 一定在）。
+
+### 1.5 Windows 上 `git clone` 会把 `.sh` 变成 CRLF，脚本直接跑不起来
+
+**现象**：在 Windows 上克隆本仓库后，把 `scripts/*.sh` 传到 VPS 执行，报：
+
+```
+bash: /root/.xui-skill/setup_base.sh: /bin/bash^M: bad interpreter: No such file or directory
+$'\r': command not found
+```
+
+**根因**：Git for Windows 默认 `core.autocrlf=true`，检出时会把文本文件的行尾
+从 LF 换成 CRLF。Bash 不认 CRLF，`set -uo pipefail` 之类的行会带上 `\r`。
+
+**修复**：
+
+1. 仓库已加 `.gitattributes` 强制 `*.sh` / `*.py` 用 LF（克隆时就会正确处理）；
+2. 已有的本地副本，可以就地转一遍：
+
+```bash
+# 在仓库根目录
+git config core.autocrlf false
+git rm --cached -r . && git reset --hard
+```
+
+3. 应急：在 VPS 上执行前先 `sed -i 's/\r$//' <脚本>`。
+
 ---
 
 ## 二、3x-ui 面板 API
@@ -130,6 +182,90 @@ curl -sk -X POST -H "Host: $D" -H "Authorization: Bearer $T" -H 'Content-Type: a
 
 用 GET 会 404。更新设置时**必须提交完整对象**（`UpdateAllSetting` 会遍历全部字段），
 只传部分字段会把其余字段清空。正确姿势：先 `POST /setting/all` 读全量 → 改目标字段 → 整份写回。
+
+### 2.6 ⚠️⚠️ 增删入站**不会**重写 `bin/config.json` —— 一颗定时炸弹
+
+**这是本次部署中最危险、也最容易被忽略的一个坑。**
+
+**现象**：用面板 API 删掉某个入站（或新增），接口返回 `success:true`，订阅、连接一切正常。
+但 **`/usr/local/x-ui/bin/config.json` 里那条入站还在**。
+此时如果 Xray 因为任何原因重启（`systemctl restart x-ui`、机器重启、面板点"重启 Xray"），
+Xray 会读到过期的 `config.json`，**尝试去绑定一个已被别的进程占用的端口**，
+于是启动失败 —— 而 3x-ui 通常把 REALITY / Hysteria2 放在同一份配置里，
+**一次失败就是整条链路全挂**。
+
+**根因**：3x-ui **v3.9.0** 的入站增删走的是 **Xray 的 gRPC API**
+（`api` 入站，`127.0.0.1:62789`），属于**运行时热更新**，
+面板只在启动时或通过 `/panel/api/setting/restartXrayService` 才会重写 `config.json`。
+API 层的"成功"只代表 Xray 内存里的配置变了，**不代表磁盘上的配置文件同步了**。
+
+**验证方法**（改完入站后必做）：
+
+```bash
+# 列出 config.json 里的入站 tag，与面板「入站列表」逐个对照
+python3 - <<'PY'
+import json
+c = json.load(open('/usr/local/x-ui/bin/config.json'))
+for ib in c.get('inbounds', []):
+    print(ib.get('tag'), ib.get('protocol'), ib.get('port'))
+PY
+```
+
+**修复**：改完入站后**无条件**执行一次：
+
+```bash
+systemctl restart x-ui
+sleep 8
+systemctl is-active x-ui          # 必须 active
+python3 -c "import json;print(len(json.load(open('/usr/local/x-ui/bin/config.json'))['inbounds']))"
+```
+
+重启后 `config.json` 才会被重写成与内存一致。
+本仓库的 `deploy_nodes.py` / `merge_subscription.py` 远端脚本**已内置**这一步。
+
+> 判据：**`config.json` 里的入站集合 == 面板入站列表**。两者不一致就是没重启。
+
+### 2.7 API Token 在 v3.9.0 只存 SHA-256，`sqlite3` 读不到明文
+
+**现象**：老教程让你这样拿 Token：
+
+```bash
+sqlite3 /etc/x-ui/x-ui.db "select value from settings where key='apiToken';"
+```
+
+在 v3.9.0 上**返回空**。
+
+**根因**：v3.9.0 把 API Token 挪到了独立的 `api_tokens` 表，
+并且**只存 SHA-256 哈希**（和密码一样），明文**只在创建的那一刻返回一次**。
+`settings` 表里已经没有 `apiToken` 这个键了。
+
+**修复**：走「登录会话 + 创建 Token」的完整流程：
+
+```bash
+BASE="https://127.0.0.1:${PANEL_PORT}/${PANEL_PATH}"
+JAR="$(mktemp)"
+
+# ① 拿 CSRF Token
+CSRF="$(curl -sk -c "$JAR" "$BASE/csrf-token" | python3 -c 'import json,sys;print(json.load(sys.stdin)["obj"])')"
+
+# ② 登录（换成真实用户名密码），Cookie 落到 $JAR
+curl -sk -b "$JAR" -c "$JAR" -X POST \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  --data-urlencode "username=${PANEL_USER}" \
+  --data-urlencode "password=${PANEL_PASS}" \
+  "$BASE/login"
+
+# ③ 创建一个新 Token，明文就在返回体里 —— 立刻记下来
+curl -sk -b "$JAR" -c "$JAR" -X POST \
+  -H "X-CSRF-Token: $CSRF" -H "Content-Type: application/json" \
+  -d '{"name":"skill"}' \
+  "$BASE/panel/api/setting/apiTokens/create"
+# → {"success":true,"obj":"<明文 Token>", ...}   ← 只出现这一次
+```
+
+⚠️ 登录接口需要 `X-CSRF-Token` 头（值取自 ①），否则返回 403。
+⚠️ **Token 忘了就重新建一个**，不要试图从数据库"找回来"。
+⚠️ 面板必须用**域名**访问（`webDomain` 已启用），本机调用要带 `Host:` 头。
 
 ---
 
@@ -276,33 +412,34 @@ cp -a /root/resolv.conf.bak /etc/resolv.conf
 > 存进数据库**（`settings` 表里已无该键），模板是硬编码的，改起来远比关系统 IPv6 麻烦，
 > **不推荐**。
 
-### 4.5 ⚠️ 上游机房会封锁特定端口（1080 / 1081 等代理常用端口）
+### 4.5 ⚠️ 上游机房可能封锁特定端口 —— 自定义端口时的头号陷阱
 
 **这是最容易被误判成"配置错误"的一类问题。**
 
-**现象**：新开的代理端口，三项检查全部正常，但**从公网就是连不上**：
+**现象**：换了个非标准端口起服务，三项检查全部正常，但**从公网就是连不上**：
 
 ```bash
 # ① 服务端监听正常
-ss -lntp | grep 1080          # → LISTEN *:1080  users:(("xray-linux-amd6",...))
+ss -lntp | grep <PORT>          # → LISTEN *:<PORT>  users:(("xray-linux-amd6",...))
 # ② 防火墙规则在
-iptables -C INPUT -p tcp --dport 1080 -j ACCEPT && echo "规则存在"
+iptables -C INPUT -p tcp --dport <PORT> -j ACCEPT && echo "规则存在"
 # ③ VPS 自己连自己公网 IP 通（注意：这个测试【无效】，见 §4.1）
-timeout 5 bash -c "exec 3<>/dev/tcp/103.53.81.160/1080" && echo "通"
+timeout 5 bash -c "exec 3<>/dev/tcp/<本机公网IP>/<PORT>" && echo "通"
 # ④ 但从外部探测 → 全部超时
 ```
 
 **根因**：**机房在更上游的位置（机房交换机 / 网关）做了端口过滤**，
-包根本没到达 VPS，所以 iptables 计数不涨、xray 也看不到连接。
+包根本没到达 VPS，所以 iptables 计数不涨、Xray 也看不到连接。
 
 日本、美国等地的机房普遍会把 **1080 / 1081 / 3128 / 8888** 这类
 "代理服务常用端口"列入黑名单，目的是防滥发垃圾邮件与开放代理。
+**默认的 443 / 8443 一般没事**，但只要你想换端口，就得先验一遍。
 
 **定位方法（对照实验）**——临时在多个端口起监听，从外部逐个探测：
 
 ```bash
 # 在 VPS 上（临时，探测完记得清理）
-for p in 1080 1081 2080 7080 8080; do
+for p in 1080 1081 2080 7080 8443; do
   (timeout 30 nc -l -p $p -q 1 </dev/null >/dev/null 2>&1 &)
   iptables -C INPUT -p tcp --dport $p -j ACCEPT 2>/dev/null \
     || iptables -I INPUT 12 -p tcp --dport $p -j ACCEPT
@@ -327,7 +464,7 @@ done
 | 段位 | 可用性 |
 |---|---|
 | **1080 / 1081** | ❌ 高概率被封锁 |
-| 3128 / 8080 / 8888 | ⚠️ 偶发被封锁，「8080 可用」不保证每家机房 |
+| 3128 / 8080 / 8888 | ⚠️ 偶发被封锁，"某家机房可用"不代表别家可用 |
 | **2000-3000** | ✅ 推荐 |
 | **7000-9000** | ✅ 推荐 |
 | 非常见高位端口（如 4xxxx） | ✅ 最稳，但注意别撞面板端口 |
@@ -346,14 +483,14 @@ done
 > 删除时用 `-D INPUT -p tcp --dport <port> -j ACCEPT` **按规则内容删**，
 > 不要用 `-D INPUT 12`（行号已变，会删错规则）。
 
-### 4.6 本机开着本地代理客户端时，测远端代理会测不准
+### 4.6 本机开着代理客户端时，测远端会测不准
 
-**现象**：用 `curl -x http://user:pass@远端:port` 测刚部署的代理，
+**现象**：从本机用 `curl -x http://...@远端:port` 测刚部署的代理，
 **时通时不通**，连续几次超时后突然又通了 —— 极易误判成"服务端不稳定"。
 
 **根因**：本机若运行着代理客户端（Clash / v2rayN / sing-box，监听 `127.0.0.1:10808` 之类），
-且设置了系统代理或 `HTTP_PROXY` 环境变量，`curl` 的请求**可能被本地客户端截胡**，
-走到了错误的出口，与远端代理的真实可用性无关。
+且设置了系统代理或 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 环境变量，
+`curl` 的请求**可能被本地客户端截胡**，走到了错误的出口，与远端服务的真实可用性无关。
 
 **正确的验证姿势**——先用 **TCP 层裸探测**排除干扰：
 
@@ -371,35 +508,15 @@ done
 
 ```bash
 env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
-  curl -s --max-time 15 -x "http://user:pass@<VPS_IP>:8080" https://api.ipify.org
+  curl -s --max-time 15 https://api.ipify.org
 ```
 
-**判据**：连续 10 次全部返回 VPS 的 IPv4 ⇒ 通过。
+**判据**：连续 10 次结果稳定 ⇒ 通过。
 若裸探测 OK 但端到端不稳定，先怀疑本机，**不要急着改服务端配置**。
 
-### 4.7 HTTP / SOCKS5 是明文协议，务必限权限
-
-`http` / `mixed` 入站**没有 TLS、没有混淆、没有抗主动探测**，
-流量是标准明文代理协议，任何中间设备都能一眼识别并阻断。
-
-**部署时至少做到**：
-
-1. **必须开认证**（`auth: "password"` + 强密码），绝不部署开放代理 ——
-   开放代理会在几天内被扫描器发现并滥用，机房通常会直接封机器。
-2. **不要用 1080 等常见端口**（见 §4.5，机房会封）。
-3. **按来源 IP 限制**（能确定使用方 IP 时最稳妥）：
-
-   ```bash
-   # 只允许指定 IP 访问 8080
-   iptables -R INPUT <行号> -s <你的IP> -p tcp --dport 8080 -j ACCEPT
-   netfilter-persistent save
-   ```
-
-4. **交付文档里明确标注**"仅建议在受信任网络使用，不要当主力翻墙手段"。
-
-> 定位：HTTP / SOCKS5 只是**给「能设代理但不认 vless/tuic」的程序用的旁路**
-> （浏览器插件、系统代理、`HTTP_PROXY` 环境变量、`curl`/`git`），
-> 主力抗封锁仍然靠 REALITY / Hysteria2 / TUIC。
+> 想让"验证脚本完全不受本机代理影响"，最稳的做法是**在 VPS 上拨号**：
+> `verify_nodes.sh` 就是在远端起客户端 + 走 `127.0.0.1` 本地 socks 出口，
+> 天然绕开本机的代理环境变量。
 
 ---
 
@@ -492,10 +609,15 @@ python scripts/fix_tuic_0rtt.py     # 会自动备份原 inbound JSON 再改
 而 v2rayN 与 v2rayNG 的**默认内核都是 Xray**。
 
 ```bash
-strings /usr/local/x-ui/bin/xray-linux-amd64 | grep -ci tuic   # 命中的只是面板自带字符串，与 Xray 无关
-# Xray 源码里确认：
-grep -rn "tuic" <xray-source>/infra/conf/ | wc -l              # → 0
+# ⚠️ Debian 默认没装 strings（见 §1.4），用 grep -a 代替
+grep -a -o -i -- "tuic" /usr/local/x-ui/bin/xray-linux-amd64 | wc -l   # → 0
+# 在 Xray 源码里确认：
+grep -rn "tuic" infra/conf/ | wc -l                                   # → 0
 ```
+
+> 注意：**不能反过来用这条判据去否定 TUIC**。TUIC 服务端本来就不在 Xray 里
+> （见 §6.5），所以 `xray-linux-amd64` 查不到 `tuic` 是**正常**的。
+> 这条只说明"Xray 内核的客户端连不上 TUIC"。
 
 **修复**：
 
@@ -513,90 +635,75 @@ journalctl -u x-ui --no-pager -n 500 | grep -iE "tuic|auth"
 iptables -t filter -L INPUT -v -n | grep 8443     # 命中数持续增长 → 包确实到了，服务端没问题
 ```
 
-### 6.5 建 SOCKS 入站必须用协议名 `mixed`，用 `socks` 会被拒
+### 6.5 TUIC v5 由 `x-ui` 面板进程自己承载，**不在** `xray-linux-amd64` 里
 
-**现象**：`POST /panel/api/inbounds/add` 建 SOCKS5 入站，无论 `settings` 怎么写，
-一律返回：
+**现象**：TUIC 节点明明在正常工作（客户端能连、能上网），但：
+
+```bash
+grep -a -o -i -- "tuic" /usr/local/x-ui/bin/xray-linux-amd64 | wc -l   # → 0
+ss -lntup | grep 8443                                                  # → 看不到 xray 监听
+```
+
+于是很容易误判成"TUIC 没部署成功"或"3x-ui 根本没装 TUIC"。
+
+**根因**：3x-ui v3.9.0 的 TUIC v5 是**面板原生实现**（`internal/tuic/`），
+**不是 Xray 的协议**。运行时结构是：
 
 ```
-request body failed validation
+客户端 ── UDP 8443 ──► x-ui 进程（QUIC + TLS 终结 + 认证）
+                          └─► 内部 socks 入站 127.0.0.1:64003 ──► xray 出站
 ```
 
-**已经试过、全部失败的写法**（不要再重复试）：
+所以：
 
-| `settings` 内容 | 结果 |
+| 检查项 | 期望值 |
 |---|---|
-| `{"auth":"password","accounts":[{"user":"u","pass":"p"}],"udp":true,"ip":"127.0.0.1"}` | ❌ 校验失败 |
-| `{"auth":"password","accounts":[{"user":"u","pass":"p"}],"udp":true}` | ❌ 校验失败 |
-| `{"auth":"noauth","accounts":[],"udp":true}` | ❌ 校验失败 |
-| `{}`（空对象） | ❌ 校验失败 |
-| 带 / 不带 `streamSettings`、`sniffing`、`allocate` | ❌ 均失败 |
+| `grep tuic xray-linux-amd64` | **0**（正常） |
+| `grep tuic /usr/local/x-ui/x-ui` | > 0 |
+| `ss -lnup \| grep 8443` | 由 **`x-ui`** 进程监听，不是 `xray-linux-amd64` |
+| `config.json` 里的 `in-8443-udp` | `protocol: socks`，`listen: 127.0.0.1`，`port: 64003` |
 
-**根因**：3x-ui v3.9.0 的**入站校验器不认 `socks` 这个协议名字符串**，
-与 `settings` 内容无关。（对比：`strings` 里能查到 `socks` 字样，但那是 Xray 侧旧字段，
-面板 HTTP 层的协议白名单里用的是另一套。）
+**对比 Hysteria2**：Hysteria2 **是**在 Xray 里的（`protocol: "hysteria"`），
+`grep -a -o -i hysteria xray-linux-amd64 | wc -l` 会有大量命中。
+**两个 QUIC 协议的实现位置不同，别用同一套判据。**
 
-**修复**：**协议名改用 `mixed`。** `mixed` 是「HTTP + SOCKS 同端口」协议，
-Xray 内部为它单独开两个协议嗅探分支，因此**同一个端口能同时接受两种客户端**：
-
-```python
-payload = {
-    "remark": "JP-SOCKS5-2080", "enable": True, "port": 2080,
-    "protocol": "mixed",                       # ← 关键：不是 "socks"
-    "settings": json.dumps({
-        "auth": "password",
-        "accounts": [{"user": "user", "pass": "pass"}],
-        "udp": True,                            # 允许 UDP ASSOCIATE
-    }),
-    "streamSettings": json.dumps({"network": "tcp", "security": "none"}),
-    "sniffing": json.dumps({"enabled": True,
-                            "destOverride": ["http", "tls", "quic", "fakedns"]}),
-}
-```
-
-**验证两种写法都能用**：
+**正确判断 TUIC 是否在跑**：
 
 ```bash
-curl -x "http://user:pass@<IP>:2080"      https://api.ipify.org   # HTTP 写法
-curl --proxy "socks5h://user:pass@<IP>:2080" https://api.ipify.org  # SOCKS5 写法
-# 两者应返回同一个出口 IP
+systemctl is-active x-ui
+ss -lnup | grep 8443
+journalctl -u x-ui --no-pager -n 200 | grep -i tuic
+iptables -t filter -L INPUT -v -n | grep 8443   # 外部来的包计数应持续增长
 ```
 
-> ⚠️ 另外注意：**`http` 入站的 `settings` 结构不同**，是
-> `{"accounts":[{"user":"..","pass":".."}],"allowTransparent":false}`，
-> 用 `clients` 数组会被拒。建完后建议回读确认 `pass` 真的写进去了
-> （留空的 `pass` 可能被规范化层丢掉，导致认证行为异常）。
+### 6.6 AnyTLS 在 3x-ui v3.9.0 上**加不了**（不是配置问题）
 
-### 6.6 HTTP / SOCKS5 入站**不会**出现在订阅里（设计如此，不是 bug）
+**现象**：想加一条 `anytls` 入站，面板协议下拉里没有，直接调 API 也被拒。
 
-**现象**：`http` / `mixed` 入站建好、客户端也绑了，但订阅 URL 里**始终只有
-vless / hysteria2 / tuic 三个节点**，新增的两个怎么都不出现。
-
-**根因**：3x-ui 的订阅服务内置的链接生成器只覆盖 5 种协议。查二进制可确认：
+**根因**：AnyTLS 是 **sing-box / mihomo 生态**的协议，
+**Xray-core 与 3x-ui v3.9.0 都没有实现**。双向确认：
 
 ```bash
-strings /usr/local/x-ui/x-ui | grep -oE "gen[A-Za-z]+Link" | sort -u
-# → genShadowsocksLink
-#   genTrojanLink
-#   genTuicLink
-#   genVlessLink
-#   genVmessLink
-#   （没有 genHttpLink / genSocksLink）
+grep -a -o -i -- "anytls" /usr/local/x-ui/bin/xray-linux-amd64 | wc -l   # → 0
+grep -a -o -i -- "anytls" /usr/local/x-ui/x-ui                            | wc -l   # → 0
 ```
 
-`/panel/api/inbounds/allLinks` 同样只返回这 5 类协议的链接。
+3x-ui v3.9.0 的协议白名单实际是：
 
-**这不是配置问题，改什么都改不出来。** 语义上也是合理的：
-`http://` / `socks://` 这类链接对翻墙客户端（v2rayN / sing-box / Clash）没有意义，
-订阅本来就不该带它们。
+```
+vmess | vless | tunnel | http | trojan | shadowsocks | mixed |
+wireguard | hysteria | mtproto | amneziawg | tuic
+```
 
-**正确做法**：**在交付文档里单独给出 HTTP / SOCKS5 的连接信息**，
-并明确告诉用户"这两个不在订阅里，需手动填"。文档模板：
+**处理**：**不要试图"修好"它**。如果用户坚持要 AnyTLS：
 
-| 节点 | 地址 | 账号 | 用途 |
-|---|---|---|---|
-| HTTP 代理 | `<IP>:8080` | `user` / `pass` | 浏览器插件、系统代理、`HTTP_PROXY` |
-| SOCKS5 代理 | `<IP>:2080` | `user` / `pass` | `curl` / `git` / 需要 UDP 的程序 |
+1. 换面板 —— sing-box 官方 `sing-box` 服务端 / `sing-box-for-*`，
+   或 mihomo 的 `anytls` 入站；
+2. 或者留在 3x-ui，用 REALITY 达到相近目的（AnyTLS 的卖点是
+   "填充 + 抗流量特征分析"，而 REALITY 借真实站点证书，被动探测同样很难区分）。
+
+> 判据永远是**查二进制字符串**（`grep -a -o -i`），不要凭印象说"支持/不支持"。
+> 注意先确认 `strings` 是否可用（见 §1.4）。
 
 > 顺带：**订阅端点本身也需要 `Host` 头**（与面板 API 同一套 `DomainValidatorMiddleware`）。
 > 从本机探测时：不带 → `403` 空响应；带 `Host: <域名>` → `200` + base64 节点列表。
@@ -608,5 +715,56 @@ strings /usr/local/x-ui/x-ui | grep -oE "gen[A-Za-z]+Link" | sort -u
 - **REALITY 私钥泄露**：私钥只存服务器，**永远不要**写进交付文档；文档里只放公钥 `pbk`。
 - **`spx`（spiderX）每次生成链接都会变**：它是随机值，不影响认证，文档里照抄当时的值即可。
 - **证书目录 `/root/cert/` 不能删**：面板、Hysteria2、TUIC 三者共用。
-- **改完入站配置记得 `x-ui restart`**，否则 Xray 配置不会重载。
+- **改完入站配置必须 `systemctl restart x-ui`** —— 不只是"让 Xray 重载"，
+  更是为了**把 `bin/config.json` 重写一致**（见 §2.6，不重启会埋下端口冲突炸弹）。
 - **备份优先**：任何改动前先 `cp /etc/x-ui/x-ui.db /root/x-ui-backup-$(date +%Y%m%d-%H%M).db`。
+
+### 7.1 清理"临时试过又不用"的方案时，别只删服务 —— 残留会咬人
+
+部署过程中常会试装一些东西（第三方通用代理二进制、临时测试脚本等），
+后来不用了。**清理必须成套做**，漏掉任何一项都会留下隐患：
+
+| 要清理的东西 | 为什么 |
+|---|---|
+| 服务 / systemd unit | `systemctl disable --now <svc>` 再删 unit，否则重启后自动拉起 |
+| 二进制与配置 | `/usr/local/bin/<bin>`、`/etc/<svc>/`、`/root/<cfg>.json` |
+| **iptables 放行规则** | 端口一直对外开着 = 攻击面；删服务不删规则是**最常见**的漏项 |
+| **3x-ui 面板里的入站** | 面板里那条入站还在，Xray 仍会去监听该端口 → 与残留服务抢端口 |
+| `bin/config.json` | 删完入站**必须 `systemctl restart x-ui`** 让配置重写（见 §2.6） |
+
+**收尾验证**（缺一不可）：
+
+```bash
+# ① 服务确实没了
+systemctl is-active <svc> || echo "已停止"
+# ② 端口确实关了 —— 必须从【外部】测，本机测无效（见 §4.1）
+#    在外部执行：timeout 5 bash -c "exec 3<>/dev/tcp/<VPS_IP>/<PORT>" || echo "已关闭"
+# ③ 防火墙里没有残留规则
+iptables -S INPUT | grep -E "<PORT1>|<PORT2>" || echo "无残留规则"
+# ④ config.json 与面板入站列表一致
+python3 -c "import json;print([i['tag'] for i in json.load(open('/usr/local/x-ui/bin/config.json'))['inbounds']])"
+```
+
+⚠️ **残留目录里往往有明文凭据**（`deploy.env`、`node-credentials.json`、
+备份的 inbound JSON、第三方代理的配置）。清理前先确认这些不会被打包分发；
+`.gitignore` 已排除常见文件名，但**自己新造的备份名不在其中**。
+
+### 7.2 3x-ui 自带约 127 MB 用不上的文件（可选清理）
+
+`/usr/local/x-ui/bin/` 里默认带了一批与本部署无关的资源，
+在 10 GB 磁盘的小 VPS 上占比可观：
+
+```bash
+ls -lh /usr/local/x-ui/bin/
+# geoip_IR.dat / geosite_IR.dat / geoip_RU.dat / geosite_RU.dat  （伊朗/俄罗斯分流库）
+# mtg-linux-amd64                                               （MTProto 代理，本方案不用）
+```
+
+**是否删除由用户决定**。若要删，先备份再删，并确认 `config.json` 没有引用它们：
+
+```bash
+grep -oE "geoip_[A-Z]+|geosite_[A-Z]+" /usr/local/x-ui/bin/config.json | sort -u   # 应为空
+```
+
+> 删了不影响 REALITY / Hysteria2 / TUIC 三件套，但**不要**删
+> `xray-linux-amd64`、`geoip.dat`、`geosite.dat` 这几个（面板/Xray 会用）。

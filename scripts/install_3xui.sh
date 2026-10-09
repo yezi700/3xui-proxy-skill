@@ -107,10 +107,69 @@ if [ -n "$DOMAIN" ]; then
 fi
 
 echo ""
-echo "########## 8. 读取 API Token ##########"
-API_TOKEN="$(sqlite3 /etc/x-ui/x-ui.db \
-  "select value from settings where key='apiToken';" 2>/dev/null || true)"
-echo "API_TOKEN = ${API_TOKEN:-<未取到，可在面板设置里查看>}"
+echo "########## 8. 获取 API Token ##########"
+# ⚠️ 3x-ui v3.9.0 起，API Token 挪到了独立的 api_tokens 表，且**只存 SHA-256**。
+#    老教程里的 `sqlite3 /etc/x-ui/x-ui.db "select value from settings where key='apiToken'"`
+#    在 v3.9.0 上**返回空**（settings 表里已无该键）。
+#    正确姿势：CSRF → 登录 → POST /panel/api/setting/apiTokens/create，明文只在创建时返回一次。
+#    详见 references/xui-api.md §1.1 与 references/pitfalls.md §2.7。
+API_TOKEN=""
+PANEL_BASE="https://127.0.0.1:${PANEL_PORT}"
+[ -n "$PANEL_PATH" ] && PANEL_BASE="${PANEL_BASE}/${PANEL_PATH}"
+
+# 面板启用了 webDomain 后，缺 Host 头会 403 空响应，所以这里统一带上
+api_curl() {
+  if [ -n "$DOMAIN" ]; then
+    curl -sk --max-time 20 -H "Host: ${DOMAIN}" "$@"
+  else
+    curl -sk --max-time 20 "$@"
+  fi
+}
+
+# 面板刚重启，给它几秒钟起来
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  ss -lnt 2>/dev/null | grep -q ":${PANEL_PORT} " && break
+  sleep 1
+done
+
+COOKIE_JAR="$(mktemp)"
+CSRF="$(api_curl -c "$COOKIE_JAR" "${PANEL_BASE}/csrf-token" 2>/dev/null \
+        | python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get("obj") or "")
+except Exception:
+    print("")' 2>/dev/null || true)"
+
+if [ -n "$CSRF" ]; then
+  api_curl -b "$COOKIE_JAR" -c "$COOKIE_JAR" -X POST \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    --data-urlencode "username=${PANEL_USER}" \
+    --data-urlencode "password=${PANEL_PASS}" \
+    "${PANEL_BASE}/login" >/dev/null 2>&1 || true
+
+  TOKEN_RESP="$(api_curl -b "$COOKIE_JAR" -c "$COOKIE_JAR" -X POST \
+    -H "X-CSRF-Token: ${CSRF}" -H "Content-Type: application/json" \
+    -d '{"name":"skill-install"}' \
+    "${PANEL_BASE}/panel/api/setting/apiTokens/create" 2>/dev/null || true)"
+
+  API_TOKEN="$(printf '%s' "$TOKEN_RESP" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print(""); raise SystemExit
+o = d.get("obj")
+print(o if isinstance(o, str) else "")' 2>/dev/null || true)"
+fi
+rm -f "$COOKIE_JAR"
+
+if [ -n "$API_TOKEN" ]; then
+  echo "API_TOKEN = ${API_TOKEN}"
+else
+  echo "⚠️  自动获取 API Token 失败（CSRF/登录路径与当前版本不符，或面板尚未就绪）。"
+  echo "    请打开面板「设置 → 安全 → API Token」手动新建，再回填 deploy.env 的 API_TOKEN。"
+  echo "    参考 references/xui-api.md §1.1。"
+fi
 
 # ---------------------------------------------------------------- 结果落盘
 echo ""

@@ -299,11 +299,20 @@ for pair in "reality:in_reality.json" "hy2:in_hy2.json" "tuic:in_tuic.json"; do
 done
 
 echo "=== 3. 当前入站列表 ==="
+# ⚠️ settings/streamSettings 在「写」的时候必须是 JSON 字符串，
+#    但在部分 3x-ui 版本的「读」接口里会直接返回已解析的对象。
+#    两种都要能处理，否则 json.loads(dict) 会抛 TypeError。
 curl -fskS -H "$H1" -H "$AUTH" "$BASE/inbounds/list" \
   | python3 -c 'import json,sys
 d=json.load(sys.stdin)
+def obj(v):
+    if isinstance(v, dict): return v
+    if isinstance(v, str) and v.strip():
+        try: return json.loads(v)
+        except Exception: return {}
+    return {}
 for ib in (d.get("obj") or []):
-    s=json.loads(ib.get("settings") or "{}")
+    s=obj(ib.get("settings"))
     print("#%s  %s  %s/%s  clients=%d" % (ib.get("id"), ib.get("remark"),
           ib.get("protocol"), ib.get("port"), len(s.get("clients") or [])))'
 
@@ -331,10 +340,36 @@ echo
 echo "=== 5. 重启 Xray ==="
 curl -fskS -X POST -H "$H1" -H "$AUTH" "$BASE/setting/restartXrayService" | api_check
 echo
+# ⚠️ 这一步【不能省】。v3.9.0 的入站增删走 Xray 的 gRPC API 热更新，
+#    不会重写 /usr/local/x-ui/bin/config.json；不重启的话该文件留着旧入站，
+#    下次 Xray 重启会因端口冲突起不来（REALITY / Hysteria2 一起挂）。
+#    详见 references/pitfalls.md §2.6。
 systemctl restart x-ui
 sleep 8
 systemctl is-active --quiet x-ui
 echo "x-ui: active"
+
+echo "=== 5.1 config.json 一致性检查 ==="
+# 目的：确认磁盘上的配置文件已被重写（见上一条注释）。
+# 注意 config.json 里除三个业务入站外，还有 3x-ui 自己加的
+#   api 入站（127.0.0.1:62789）与 TUIC 的内部 socks 入站（127.0.0.1:64003），
+# 所以这里只做「打印 + 与上面第 3 步的面板入站列表对照」，不做脆弱的自动等值判断。
+python3 - <<'PYEOF'
+import json
+
+try:
+    cfg = json.load(open('/usr/local/x-ui/bin/config.json'))
+except Exception as e:
+    raise SystemExit('无法读取 bin/config.json: %s' % e)
+
+print('config.json 中的入站：')
+for ib in cfg.get('inbounds', []):
+    print('  tag=%-14s proto=%-10s listen=%-10s port=%s'
+          % (ib.get('tag'), ib.get('protocol'), ib.get('listen') or '0.0.0.0',
+             ib.get('port')))
+print('提示：上面应只出现 3 个业务入站 + api(62789) + TUIC 内部 socks(64003)。')
+print('      若看到已被删除的旧入站，说明 config.json 未重写，请再执行一次 systemctl restart x-ui。')
+PYEOF
 
 echo "=== 6. 分享链接 ==="
 curl -fskS -H "$H1" -H "$AUTH" "$BASE/inbounds/allLinks" \
@@ -430,7 +465,9 @@ def main() -> int:
             "python3 - <<'PYEOF'\n"
             "import json\n"
             "with open('/root/.xui-skill/in_reality.json') as f: p = json.load(f)\n"
-            "r = json.loads(p['streamSettings'])['realitySettings']\n"
+            "ss = p['streamSettings']\n"
+            "ss = json.loads(ss) if isinstance(ss, str) else ss\n"
+            "r = ss['realitySettings']\n"
             "print(json.dumps({'reality_priv': r['privateKey'], "
             "'reality_pub': r['settings']['publicKey']}))\nPYEOF",
             timeout=30,

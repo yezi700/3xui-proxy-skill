@@ -169,18 +169,31 @@ def render_md(ctx: dict) -> str:
     # 4. 兼容性
     A("## 4. ⚠️ 客户端兼容性（重要）")
     A("")
-    A("Xray-core ≥ **26.9.8** 起，REALITY 服务端要求客户端 ClientHello 携带")
-    A("`X25519MLKEM768`（后量子混合密钥交换）。不支持的客户端连 REALITY 会失败。")
+    A("两条「连不上」的根因**完全不同**，别搞混：")
     A("")
-    A("| 客户端 | REALITY | Hysteria2 | TUIC |")
-    A("|---|---|---|---|")
-    A("| v2rayN / v2rayNG（Xray 内核） | ✅ | ✅ | ✅ |")
-    A("| mihomo ≥ 1.19.30 / Clash Verge Rev | ✅ | ✅ | ✅ |")
-    A("| Hiddify / Karing（sing-box 内核） | ❌ | ✅ | ✅ |")
-    A("| Shadowrocket 旧版（2.2.92） | ❌ | ✅ | ✅ |")
+    A("- Xray-core ≥ **26.9.8** 起，REALITY 服务端要求客户端 ClientHello 携带")
+    A("  `X25519MLKEM768`（后量子混合密钥交换）→ **sing-box 系客户端连不上 REALITY**。")
+    A("- **Xray-core 根本没有实现 Hysteria2 / TUIC** → **Xray 系客户端连不上这两个**。")
     A("")
-    A("**结论**：用 Hiddify / Karing / 旧版小火箭的用户，请选择 **Hysteria2 或 TUIC** 节点。")
-    A("这不是配置错误，是客户端内核尚未跟进。")
+    A("| 客户端 | 内核 | REALITY | Hysteria2 | TUIC |")
+    A("|---|---|---|---|---|")
+    A("| v2rayN（默认配置） | Xray | ✅ | ❌ | ❌ |")
+    A("| v2rayN（切到 sing-box 内核） | sing-box | ❌ | ✅ | ✅ |")
+    A("| v2rayNG (Android) | Xray（无法切） | ✅ | ❌ | ❌ |")
+    A("| Clash Verge Rev / Clash Meta | mihomo | ✅ | ✅ | ✅ |")
+    A("| Hiddify / Karing / NekoBox | sing-box | ❌ | ✅ | ✅ |")
+    A("| Shadowrocket 旧版（2.2.92） | 自研 | ❌ | ✅ | ✅ |")
+    A("")
+    A("**结论（两条都要看，别只记住一条）**：")
+    A("")
+    A("1. **sing-box 系**（Hiddify / Karing / NekoBox / 旧版小火箭）")
+    A("   → 连不上 **REALITY**，请改用 **Hysteria2 或 TUIC**。")
+    A("2. **Xray 系**（v2rayN 默认 / v2rayNG）")
+    A("   → 连不上 **Hysteria2 / TUIC**，只能用 **REALITY**。")
+    A("   v2rayN 可在「设置 → 参数设置」把默认内核切成 sing-box；v2rayNG 没有内核切换。")
+    A("3. **mihomo 系**（Clash Verge Rev / Clash Meta）三个节点全部可用，最省心。")
+    A("")
+    A("以上都不是配置错误，是客户端内核的实现差异。")
     A("")
 
     # 5. 防火墙
@@ -237,10 +250,14 @@ def render_md(ctx: dict) -> str:
     A("")
     A("1. **不要删除 `/root/cert/`** —— 面板、Hysteria2、TUIC 共用这里的证书。")
     A("2. **443 同时承载 TCP（REALITY）与 UDP（Hysteria2）**，改防火墙时两个都要留。")
-    A("3. 改任何入站配置后要 `systemctl restart x-ui`。")
+    A("3. **改任何入站配置后必须 `systemctl restart x-ui`** —— v3.9.0 增删入站走 Xray 的")
+    A("   gRPC API 热更新，**不会重写 `bin/config.json`**；不重启的话该文件留着旧入站，")
+    A("   下次 Xray 重启会因端口冲突起不来（REALITY 与 Hysteria2 一起挂）。")
     A("4. 从服务器本机自测代理**无法验证防火墙**（走 lo，不经 INPUT 链），外部可达性需另测。")
     A("5. `subId` 全局唯一，合并订阅靠「一个客户端绑多个入站」，不能共享 subId。")
-    A("6. 本文件含明文凭据，请妥善保管，不要提交到公开仓库。")
+    A("6. **API Token 只在创建时返回一次**（v3.9.0 的 `api_tokens` 表只存 SHA-256）；")
+    A("   本文件里的 Token 请立刻备份到密码管理器，丢了只能在面板里重新建一个。")
+    A("7. 本文件含明文凭据，请妥善保管，不要提交到公开仓库。")
     A("")
 
     return "\n".join(L)
@@ -343,21 +360,36 @@ pre{{background:var(--code-bg);padding:12px 14px;border-radius:8px;
 
 <h2 id="compat">4. ⚠️ 客户端兼容性（重要）</h2>
 <div class="card">
-<p>Xray-core ≥ <b>26.9.8</b> 起，REALITY 服务端要求客户端 ClientHello 携带
-<code>X25519MLKEM768</code>（后量子混合密钥交换）。不支持的客户端连 REALITY 会失败。</p>
+<p>两条「连不上」的根因<b>完全不同</b>，别搞混：</p>
+<ul>
+<li>Xray-core ≥ <b>26.9.8</b> 起，REALITY 服务端要求客户端 ClientHello 携带
+<code>X25519MLKEM768</code>（后量子混合密钥交换）→ <b>sing-box 系客户端连不上 REALITY</b>。</li>
+<li><b>Xray-core 根本没有实现 Hysteria2 / TUIC</b> → <b>Xray 系客户端连不上这两个</b>。</li>
+</ul>
 <table>
-<tr><th>客户端</th><th>REALITY</th><th>Hysteria2</th><th>TUIC</th></tr>
-<tr><td>v2rayN / v2rayNG（Xray 内核）</td>
-    <td><span class="pill y">可用</span></td><td><span class="pill y">可用</span></td><td><span class="pill y">可用</span></td></tr>
-<tr><td>mihomo ≥ 1.19.30 / Clash Verge Rev</td>
-    <td><span class="pill y">可用</span></td><td><span class="pill y">可用</span></td><td><span class="pill y">可用</span></td></tr>
-<tr><td>Hiddify / Karing（sing-box 内核）</td>
+<tr><th>客户端</th><th>内核</th><th>REALITY</th><th>Hysteria2</th><th>TUIC</th></tr>
+<tr><td>v2rayN（默认配置）</td><td>Xray</td>
+    <td><span class="pill y">可用</span></td><td><span class="pill n">不可用</span></td><td><span class="pill n">不可用</span></td></tr>
+<tr><td>v2rayN（切到 sing-box 内核）</td><td>sing-box</td>
     <td><span class="pill n">不可用</span></td><td><span class="pill y">可用</span></td><td><span class="pill y">可用</span></td></tr>
-<tr><td>Shadowrocket 旧版（2.2.92）</td>
+<tr><td>v2rayNG (Android)</td><td>Xray（无法切）</td>
+    <td><span class="pill y">可用</span></td><td><span class="pill n">不可用</span></td><td><span class="pill n">不可用</span></td></tr>
+<tr><td>Clash Verge Rev / Clash Meta</td><td>mihomo</td>
+    <td><span class="pill y">可用</span></td><td><span class="pill y">可用</span></td><td><span class="pill y">可用</span></td></tr>
+<tr><td>Hiddify / Karing / NekoBox</td><td>sing-box</td>
+    <td><span class="pill n">不可用</span></td><td><span class="pill y">可用</span></td><td><span class="pill y">可用</span></td></tr>
+<tr><td>Shadowrocket 旧版（2.2.92）</td><td>自研</td>
     <td><span class="pill n">不可用</span></td><td><span class="pill y">可用</span></td><td><span class="pill y">可用</span></td></tr>
 </table>
-<p><b>结论</b>：用 Hiddify / Karing / 旧版小火箭的用户，请选择 <b>Hysteria2 或 TUIC</b> 节点。
-这不是配置错误，是客户端内核尚未跟进。</p>
+<p><b>结论（两条都要看，别只记住一条）</b>：</p>
+<ol>
+<li><b>sing-box 系</b>（Hiddify / Karing / NekoBox / 旧版小火箭）→ 连不上 <b>REALITY</b>，
+    请改用 <b>Hysteria2 或 TUIC</b>。</li>
+<li><b>Xray 系</b>（v2rayN 默认 / v2rayNG）→ 连不上 <b>Hysteria2 / TUIC</b>，只能用 <b>REALITY</b>。
+    v2rayN 可在「设置 → 参数设置」把默认内核切成 sing-box；v2rayNG 没有内核切换。</li>
+<li><b>mihomo 系</b>（Clash Verge Rev / Clash Meta）三个节点全部可用，最省心。</li>
+</ol>
+<p>以上都不是配置错误，是客户端内核的实现差异。</p>
 </div>
 
 <h2 id="fw">5. 防火墙放行</h2>
@@ -379,9 +411,13 @@ pre{{background:var(--code-bg);padding:12px 14px;border-radius:8px;
 <ol>
 <li><b>不要删除 <code>/root/cert/</code></b> —— 面板、Hysteria2、TUIC 共用这里的证书。</li>
 <li><b>443 同时承载 TCP（REALITY）与 UDP（Hysteria2）</b>，改防火墙时两个都要留。</li>
-<li>改任何入站配置后要 <code>systemctl restart x-ui</code>。</li>
+<li><b>改任何入站配置后必须 <code>systemctl restart x-ui</code></b> —— v3.9.0 增删入站走 Xray 的
+gRPC API 热更新，<b>不会重写 <code>bin/config.json</code></b>；不重启的话该文件留着旧入站，
+下次 Xray 重启会因端口冲突起不来（REALITY 与 Hysteria2 一起挂）。</li>
 <li>从服务器本机自测代理<b>无法验证防火墙</b>（走 lo，不经 INPUT 链），外部可达性需另测。</li>
 <li><code>subId</code> 全局唯一，合并订阅靠「一个客户端绑多个入站」，不能共享 subId。</li>
+<li><b>API Token 只在创建时返回一次</b>（v3.9.0 的 <code>api_tokens</code> 表只存 SHA-256）；
+本文件里的 Token 请立刻备份到密码管理器，丢了只能在面板里重新建一个。</li>
 <li>本文件含明文凭据，请妥善保管，不要提交到公开仓库。</li>
 </ol>
 </div>

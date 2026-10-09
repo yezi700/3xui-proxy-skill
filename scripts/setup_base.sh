@@ -45,8 +45,14 @@ EOF
 echo ""
 echo "########## 1. 安装基础依赖 ##########"
 apt-get update -y
+# python3：本仓库的远端脚本（deploy_nodes / merge_subscription / verify_nodes /
+#   render_report 的采集段）全都用 python3 解析 JSON，最小化系统上可能没有，
+#   所以在这里显式装上。
+# binutils（提供 strings）：可选，只为排查协议字符串方便；
+#   脚本本身不依赖它（用 grep -a 代替，见 references/pitfalls.md §1.4）。
 apt-get install -y \
   sudo curl wget ca-certificates unzip socat cron tzdata jq sqlite3 \
+  python3 binutils \
   iptables iptables-persistent netfilter-persistent
 
 echo "########## 2. 设置时区 Asia/Shanghai ##########"

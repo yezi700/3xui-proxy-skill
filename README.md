@@ -3,11 +3,11 @@
 `https://github.com/yezi700/3xui-proxy-skill`
 
 一个 WorkBuddy / Claude **Agent Skill**：把一台全新的 Linux VPS 变成一套可用的代理服务
-（3x-ui 面板 + VLESS-REALITY / Hysteria2 / TUIC v5 三协议节点，可选追加 HTTP / SOCKS5），
+（3x-ui 面板 + VLESS-REALITY / Hysteria2 / TUIC v5 三协议节点），
 并输出可直接导入客户端的链接与订阅。
 
-> 这不是又一个"复制粘贴命令"的教程。它把**真实部署中踩到的 30 多个坑**（系统版本差异、API 陷阱、
-> 机房端口封锁、客户端兼容性破坏性变更）固化成了可复用的流程与脚本。
+> 这不是又一个"复制粘贴命令"的教程。它把**真实部署中踩到的几十个坑**（系统版本差异、API 陷阱、
+> 机房端口封锁、gRPC 热更新陷阱、客户端兼容性破坏性变更）固化成了可复用的流程与脚本。
 
 ## 它能解决什么
 
@@ -24,9 +24,12 @@
 | 代理**出口 IP 是 IPv6**，但需要固定 IPv4 出口 | 根因是 Xray `domainStrategy=AsIs` + 系统有 IPv6；`setup_base.sh` 可一键屏蔽 IPv6（**先换 DNS 再关**，带断网自动回滚） |
 | TUIC 节点**时通时不通**，重连就失败 | 3x-ui TUIC 认证要求 `HandshakeComplete`，0-RTT 连接必然认证失败；`fix_tuic_0rtt.py` 一键关闭 0-RTT |
 | **v2rayN / v2rayNG 导入 TUIC 后一直测速超时** | **Xray 内核根本没有 TUIC/Hysteria2**。v2rayN 切 sing-box 内核即可；v2rayNG 无内核切换，只能用 REALITY |
-| 建 SOCKS 入站报 `request body failed validation` | 3x-ui 不认 `socks` 协议名，**必须用 `mixed`**（HTTP + SOCKS 同端口） |
-| 新端口**服务端一切正常，公网就是连不上** | 机房在上游封了 1080/1081 等代理常用端口；`add_http_socks.py` 直接拒绝黑名单端口，建议改用 2080 / 2000-3000 / 7000-9000 |
-| 加了 HTTP/SOCKS5，**订阅里却始终没有** | 3x-ui 只为 vmess/vless/trojan/ss/tuic 生成链接。这是设计如此，改不出来 —— 交付文档需单独列出 |
+| 查二进制"确认协议是否支持"，结果**所有协议都是 0 命中** | Debian 默认没装 `strings`（属于 `binutils`），命令静默失败。改用 `grep -a -o -i -- <关键字> <bin> \| wc -l` |
+| 增删入站后重启 Xray，**REALITY 与 Hysteria2 一起挂掉** | v3.9.0 增删入站走 Xray 的 gRPC API 热更新，**不重写 `bin/config.json`**；该文件留着旧入站，重启即端口冲突。改完入站必须 `systemctl restart x-ui` |
+| 以为 TUIC 不在 Xray 里就是"没装" | TUIC v5 由 **`x-ui` 面板进程自己承载**（转发给内部 socks 入站 127.0.0.1:64003），`xray-linux-amd64` 里查不到属正常 |
+| 想加 AnyTLS 节点 | **3x-ui v3.9.0 不支持**（`xray-linux-amd64` 与 `x-ui` 二进制里 `anytls` 均 0 命中），只有 sing-box / mihomo 实现 |
+| 装完 API Token 读不出来 | v3.9.0 的 `api_tokens` 表**只存 SHA-256**，明文仅创建时返回一次。脚本改用「登录会话 + `POST /panel/api/setting/apiTokens/create`」获取 |
+| Windows 上 `git clone` 后 `.sh` 脚本报 `$'\r': command not found` | Git 的 `core.autocrlf` 把脚本换成了 CRLF。仓库已加 `.gitattributes` 强制 `*.sh`/`*.py` 用 LF |
 | 测新代理**时通时不通**，以为服务端不稳 | 本机开着的代理客户端会截胡 `curl -x`。先用 TCP 裸探测（`/dev/tcp`）连续验证再下结论 |
 
 ## 安装
@@ -46,6 +49,11 @@ git clone https://github.com/yezi700/3xui-proxy-skill.git `
 ```
 
 重启会话后生效。WorkBuddy 会在识别到"部署代理节点"类请求时自动加载。
+
+> ⚠️ **Windows 用户**：仓库根目录有 `.gitattributes`，已强制 `*.sh` / `*.py` 使用 LF 换行，
+> 克隆后脚本可以直接传到 Linux 执行。如果你的 Git 全局设置了 `core.autocrlf=true`
+> 且克隆的是**旧版本**，请先 `git pull` 拉取 `.gitattributes`，或参考
+> `references/pitfalls.md` §1.5 就地转换。
 
 ### 方式二：打包分发
 
@@ -93,6 +101,7 @@ skill 会先按需引导域名准备与 DNS 预检，再按 Step 0→8 执行：
 ├── README.md
 ├── LICENSE
 ├── .gitignore
+├── .gitattributes                        # 强制 .sh/.py 用 LF（Windows 克隆不踩 CRLF 坑）
 ├── references/
 │   ├── domain-and-dns.md                 # 免费域名、Cloudflare、A/AAAA 与预检
 │   ├── pitfalls.md                       # 踩坑大全（核心价值）
@@ -104,10 +113,9 @@ skill 会先按需引导域名准备与 DNS 预检，再按 Step 0→8 执行：
 │   ├── ssh_run.py                        # SSH 执行器
 │   ├── xui_api.py                        # 面板 API 客户端
 │   ├── setup_base.sh                     # 系统基线（含屏蔽 IPv6）
-│   ├── install_3xui.sh                   # 安装面板 + 证书
+│   ├── install_3xui.sh                   # 安装面板 + 证书 + 获取 API Token
 │   ├── deploy_nodes.py                   # 建 3 个节点
 │   ├── fix_tuic_0rtt.py                  # 关闭 TUIC 0-RTT
-│   ├── add_http_socks.py                 # 可选：加 HTTP / SOCKS5(mixed) 入站
 │   ├── merge_subscription.py             # 合并订阅
 │   ├── verify_nodes.sh                   # 端到端验证
 │   └── render_report.py                  # 生成交付文档
@@ -125,11 +133,7 @@ skill 会先按需引导域名准备与 DNS 预检，再按 Step 0→8 执行：
 | **sing-box**（Hiddify / Karing / NekoBox / 旧 Shadowrocket） | ❌ | ✅ | ✅ | 用 Hy2 / TUIC |
 | **mihomo**（Clash Verge / Clash Meta） | ✅ | ✅ | ✅ | 无需调整，最省心 |
 
-> **HTTP / SOCKS5 不在这张表里** —— 它们不是翻墙协议，是给「能设代理但不认 vless/tuic」的程序
-> （浏览器插件、系统代理、`HTTP_PROXY`、`curl`/`git`、Docker）用的旁路。所有客户端都能用，
-> 但**不会出现在订阅里**，需要手动填地址。
-
-详见 `references/protocols-and-clients.md`（§7 是 HTTP/SOCKS5 专章）。
+详见 `references/protocols-and-clients.md`。
 
 ## 发布与更新
 
@@ -214,6 +218,45 @@ python -m compileall -q scripts tests
   执行前请自行审阅 `scripts/` 下所有文件。
 - `deploy.env` 含明文凭据，**已在 `.gitignore` 中排除**，请勿提交。
 - 建议部署完成后在面板里修改默认用户名与密码。
+
+## 版本历史
+
+### v1.3.0
+
+基于一次真实的 VPS 部署复盘做的收敛与加固：
+
+- **移除 HTTP / SOCKS5 通用代理支持** —— 删除 `scripts/add_http_socks.py` 及
+  SKILL / README / references / `deploy.env.example` 中的全部相关内容。
+  本 skill 聚焦 REALITY / Hysteria2 / TUIC 三件套。
+- **修 `install_3xui.sh` 的 API Token 读取**：v3.9.0 起 `api_tokens` 表只存 SHA-256，
+  老的 `sqlite3 ... where key='apiToken'` 返回空。改用
+  CSRF → 登录 → `POST /panel/api/setting/apiTokens/create` 流程。
+- **修 `settings` / `streamSettings` 的类型假设**：写的时候必须是 JSON 字符串，
+  但部分版本的**读**接口直接返回对象，`json.loads(dict)` 会抛 `TypeError`。
+  `deploy_nodes.py` / `verify_nodes.sh` 已改为两种都兼容。
+- **修 `verify_nodes.sh` 的 REALITY 自检**：原来先写客户端配置、后回读公钥，
+  导致 `publicKey` 为空、握手必然失败。现在改成**先回读再写配置**。
+- **修 `render_report.py` 的兼容性矩阵**：原表把 Xray 内核写成三个节点全可用，
+  与实际相反（Xray 无 TUIC / Hysteria2）。交付文档的矩阵已按真实情况重写。
+- **`merge_subscription.py` 的 flow 回读更健壮**：`/clients/get/<email>` 在不同版本
+  返回结构不一致，现在同时查 `/clients/list` 兜底。
+- **新增 6 个坑**：gRPC 热更新不重写 `bin/config.json`（端口冲突定时炸弹）、
+  TUIC v5 由 `x-ui` 面板进程承载、AnyTLS 不受支持、
+  Debian 默认没装 `strings`（假阴性陷阱）、Windows 克隆的 CRLF 问题、
+  清理临时方案时的残留清单。
+- **新增 `.gitattributes`** 强制脚本 LF；`setup_base.sh` 补装 `python3`。
+
+### v1.2.0
+
+新增 HTTP / SOCKS5（`mixed`）通用代理支持 + 三个新踩的坑。
+
+### v1.1.0
+
+屏蔽 IPv6 强制 IPv4 出口；关闭 TUIC 0-RTT；修正客户端兼容性结论。
+
+### v1.0.0
+
+首个版本：3x-ui + VLESS-REALITY / Hysteria2 / TUIC v5 全流程。
 
 ## 许可
 

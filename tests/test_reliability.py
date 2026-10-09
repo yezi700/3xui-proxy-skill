@@ -31,19 +31,19 @@ class ConfigTests(unittest.TestCase):
     def test_env_only_options_and_empty_override(self):
         with patch.object(ssh_run, '_candidate_env_files', return_value=[]), \
              patch.dict(os.environ, {'DISABLE_IPV6': '0', 'MERGED_SUBID': '',
-                                    'PROXY_PASS': "a'b", 'NODE_PREFIX': 'custom'}, clear=True):
+                                    'PANEL_PASS': "a'b", 'NODE_PREFIX': 'custom'}, clear=True):
             self.assertEqual(ssh_run.load_env(), {'DISABLE_IPV6': '0',
-                'MERGED_SUBID': '', 'PROXY_PASS': "a'b", 'NODE_PREFIX': 'custom'})
+                'MERGED_SUBID': '', 'PANEL_PASS': "a'b", 'NODE_PREFIX': 'custom'})
 
     def test_bom_quotes_and_empty_override(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'deploy.env'
-            path.write_text('DOMAIN=test\nPROXY_PASS=endswith\'\nPANEL_PATH="secret"\n',
+            path.write_text('DOMAIN=test\nPANEL_PASS=endswith\'\nPANEL_PATH="secret"\n',
                             encoding='utf-8-sig')
             with patch.object(ssh_run, '_candidate_env_files', return_value=[str(path)]), \
                  patch.dict(os.environ, {'PANEL_PATH': ''}, clear=True):
                 self.assertEqual(ssh_run.load_env(), dict(DOMAIN='test',
-                    PROXY_PASS="endswith'", PANEL_PATH=''))
+                    PANEL_PASS="endswith'", PANEL_PATH=''))
 
     def test_reject_shell_in_environment_key(self):
         with self.assertRaises(ValueError):

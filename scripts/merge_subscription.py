@@ -117,13 +117,51 @@ printf '%s\n' "$RESP" | api_check
 echo "=== 4. 保留原始客户端，待外部验证新订阅后再按需清理 ==="
 
 echo "=== 5. 校验 flow 是否保留 ==="
+# ⚠️ /clients/get/<email> 的返回结构在不同版本上不一致：
+#    有时 obj 是空的、有时包了一层 client、有时 id 是数据库行号。
+#    所以这里同时查 /clients/get 与 /clients/list，任一处能看到 flow 就算通过。
 curl -fskS -H "$H1" -H "$AUTH" "$CB/get/${MERGED_EMAIL}" \
-  | python3 -c 'import json,sys
-d=json.load(sys.stdin)
-o=d.get("obj") or {}
-print("email=%s flow=%r id=%s" % (o.get("email"), o.get("flow"), o.get("id")))
-if d.get("success") is not True or o.get("flow") != "xtls-rprx-vision":
-    raise SystemExit("合并客户端回读失败或 flow 丢失；原客户端保持不变")'
+  > /root/.xui-skill/merged-client.json 2>/dev/null || true
+curl -fskS -H "$H1" -H "$AUTH" "$CB/list" \
+  > /root/.xui-skill/clients.json 2>/dev/null || true
+python3 - "$MERGED_EMAIL" <<'PYEOF'
+import json, sys
+email = sys.argv[1]
+
+
+def load(path):
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def find_flow(d):
+    obj = d.get("obj") if isinstance(d, dict) else None
+    if isinstance(obj, dict):
+        if obj.get("email") == email:
+            return obj.get("flow")
+        inner = obj.get("client")
+        if isinstance(inner, dict) and inner.get("email") == email:
+            return inner.get("flow")
+        # 有些版本只回一个裸 client 对象，不带 email
+        if "flow" in obj and obj.get("email") in (None, email):
+            return obj.get("flow")
+    if isinstance(obj, list):
+        for item in obj:
+            if isinstance(item, dict) and item.get("email") == email:
+                return item.get("flow")
+    return None
+
+
+flow = find_flow(load("/root/.xui-skill/merged-client.json"))
+if flow is None:
+    flow = find_flow(load("/root/.xui-skill/clients.json"))
+print("merged flow = %r" % flow)
+if flow != "xtls-rprx-vision":
+    raise SystemExit("合并客户端回读失败或 flow 丢失；原客户端保持不变")
+PYEOF
 
 echo "=== 6. 重启 Xray ==="
 curl -fskS -X POST -H "$H1" -H "$AUTH" "$BASE/setting/restartXrayService" | api_check

@@ -111,7 +111,64 @@ echo "SB_BIN   = $SB_BIN"
 echo ""
 echo "########## 2. REALITY (TCP ${REALITY_PORT}) ##########"
 REALITY_SOCKS=21080
-if check_port_free $REALITY_SOCKS; then
+
+# ⚠️ 必须【先】把 publicKey / shortId / serverName 从入站回读出来，
+#    再写客户端配置。顺序反了的话 publicKey 是空的，握手必然失败，
+#    会被误判成"服务端坏了"。
+REALITY_PUB="${REALITY_PUB:-}"
+REALITY_SID="${REALITY_SID:-}"
+if [ -n "${API_TOKEN:-}" ] && [ -n "${PANEL_PORT:-}" ] && [ -n "${PANEL_PATH:-}" ]; then
+  curl -sk -H "Host: ${DOMAIN}" -H "Authorization: Bearer ${API_TOKEN}" \
+    "https://127.0.0.1:${PANEL_PORT}/${PANEL_PATH}/panel/api/inbounds/list" \
+    > "$WORK/ib.json" 2>/dev/null || true
+
+  # ⚠️ settings/streamSettings 在不同 3x-ui 版本里可能是对象也可能是 JSON 字符串，
+  #    两种都要处理（json.loads(dict) 会抛 TypeError）。
+  python3 - "$WORK/ib.json" > "$WORK/reality_vars.sh" <<'PYEOF'
+import json, shlex, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception as e:
+    sys.stderr.write("回读入站失败: %s\n" % e)
+    raise SystemExit(0)
+
+def obj(v):
+    if isinstance(v, dict):
+        return v
+    if isinstance(v, str) and v.strip():
+        try:
+            return json.loads(v)
+        except Exception:
+            return {}
+    return {}
+
+for ib in (d.get("obj") or []):
+    ss = obj(ib.get("streamSettings"))
+    rs = ss.get("realitySettings") if isinstance(ss, dict) else None
+    if ib.get("protocol") == "vless" and isinstance(rs, dict):
+        pub = ((rs.get("settings") or {}).get("publicKey")) or ""
+        sid = (rs.get("shortIds") or [""])[0] or ""
+        sni = (rs.get("serverNames") or [""])[0] or ""
+        print("REALITY_PUB=%s" % shlex.quote(pub))
+        print("REALITY_SID=%s" % shlex.quote(sid))
+        if sni:
+            print("REALITY_SNI=%s" % shlex.quote(sni))
+        break
+PYEOF
+
+  # shellcheck disable=SC1090
+  [ -s "$WORK/reality_vars.sh" ] && . "$WORK/reality_vars.sh"
+fi
+
+echo "REALITY_PUB = ${REALITY_PUB:-<空>}"
+echo "REALITY_SID = ${REALITY_SID:-<空>}"
+echo "REALITY_SNI = ${REALITY_SNI:-<空>}"
+
+if [ -z "$REALITY_PUB" ]; then
+  echo "!!! 没能回读到 REALITY 公钥（publicKey），跳过 REALITY 拨号测试。"
+  echo "    原因通常是 API_TOKEN / PANEL_PORT / PANEL_PATH 未注入。"
+  echo "    临时办法：在 deploy.env 里显式填 REALITY_PUB 与 REALITY_SID。"
+elif check_port_free $REALITY_SOCKS; then
   cat > "$WORK/cfg_reality.json" <<EOF
 {
   "log": {"loglevel": "warning"},
@@ -130,32 +187,13 @@ if check_port_free $REALITY_SOCKS; then
       "network": "tcp", "security": "reality",
       "realitySettings": {
         "serverName": "${REALITY_SNI}", "fingerprint": "chrome",
-        "publicKey": "${REALITY_PUB:-}", "shortId": "${REALITY_SID:-}",
+        "publicKey": "${REALITY_PUB}", "shortId": "${REALITY_SID}",
         "spiderX": "/"
       }
     }
   }]
 }
 EOF
-  # publicKey / shortId 从入站回读，避免手工填错
-  if [ -n "${API_TOKEN:-}" ] && [ -n "${PANEL_PORT:-}" ] && [ -n "${PANEL_PATH:-}" ]; then
-    curl -sk -H "Host: ${DOMAIN}" -H "Authorization: Bearer ${API_TOKEN}" \
-      "https://127.0.0.1:${PANEL_PORT}/${PANEL_PATH}/panel/api/inbounds/list" \
-      > "$WORK/ib.json" 2>/dev/null
-    python3 - <<PYEOF
-import json
-try:
-    d = json.load(open("$WORK/ib.json"))
-    for ib in (d.get("obj") or []):
-        if ib.get("protocol") == "vless" and "reality" in (ib.get("streamSettings") or ""):
-            ss = json.loads(ib["streamSettings"])["realitySettings"]
-            print("publicKey =", ss.get("settings", {}).get("publicKey"))
-            print("shortId   =", (ss.get("shortIds") or [""])[0])
-            print("serverName=", (ss.get("serverNames") or [""])[0])
-except Exception as e:
-    print("回读失败:", e)
-PYEOF
-  fi
 
   "$XRAY_BIN" run -c "$WORK/cfg_reality.json" > "$WORK/reality.log" 2>&1 &
   RPID=$!
@@ -246,7 +284,7 @@ if check_port_free $TUIC_SOCKS; then
     "server": "127.0.0.1", "server_port": ${TUIC_PORT},
     "uuid": "${TUIC_UUID}", "password": "${TUIC_PASSWORD}",
     "congestion_control": "bbr", "udp_relay_mode": "native",
-    "zero_rtt_handshake": true,
+    "zero_rtt_handshake": false,
     "tls": {"enabled": true, "server_name": "${DOMAIN}",
             "insecure": false, "alpn": ["h3"]}
   }]

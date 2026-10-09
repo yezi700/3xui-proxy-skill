@@ -16,14 +16,27 @@
 | VMess + WS + TLS | TCP | 443 | ★★ | 中 | 中 | ✅ | 需要 CDN 配合才好用 |
 | Shadowsocks | TCP | 任意 | ★★ | 低 | 中 | ❌ | 协议简单，抗主动探测差 |
 | WireGuard | UDP | 任意 | ★ | 低 | ★★★★ | ❌ | 特征明显，易被 QoS/封 |
-| **HTTP 代理** | TCP | 8080 | ☆ | 低 | 中 | ❌ | **明文**，给「能设代理」的程序用，非翻墙 |
-| **SOCKS5**（3x-ui 里名为 `mixed`） | TCP | 2080 | ☆ | 低 | 中 | ❌ | **明文**，支持 UDP ASSOCIATE；可开认证 |
-| AnyTLS | — | — | — | — | — | — | **3x-ui v3.9.0 不支持**（见下） |
+| AnyTLS | — | — | — | — | — | — | **3x-ui v3.9.0 不支持**（见 §1.1） |
 
-> ⚠️ **HTTP / SOCKS5 不是翻墙协议**。它们没有加密与混淆，抗封锁能力≈0，
-> 只适合「浏览器插件 / 系统代理 / `HTTP_PROXY` 环境变量 / `curl`·`git`」这类
-> **能设代理但认不了 vless/tuic 的程序**。**绝对不要**把它们当作绕过封锁的主力 ——
-> 主力永远是 REALITY / Hysteria2 / TUIC。
+### 1.1 AnyTLS 的确认方法
+
+AnyTLS 是 sing-box / mihomo 生态的协议，**3x-ui v3.9.0 没有实现**
+（面板协议下拉里没有，直接调 API 也会被拒）。
+
+不要凭印象说"支持/不支持"，直接查二进制：
+
+```bash
+# ⚠️ Debian 默认没装 strings（见 pitfalls.md §1.4），用 grep -a 代替
+grep -a -o -i -- "anytls" /usr/local/x-ui/bin/xray-linux-amd64 | wc -l   # → 0
+grep -a -o -i -- "anytls" /usr/local/x-ui/x-ui                           | wc -l   # → 0
+
+# 面板实际支持的协议白名单
+grep -a -o -E "amneziawg|hysteria|mtproto|wireguard|shadowsocks|tunnel|trojan|vless|vmess|tuic" \
+  /usr/local/x-ui/x-ui | sort -u
+```
+
+若用户坚持要 AnyTLS，只能换服务端（sing-box 官方 / mihomo）；
+留在 3x-ui 的话，用 REALITY 达成相近目的（借真实站点证书，被动探测同样很难区分）。
 
 ### 为什么推荐"REALITY + Hysteria2 + TUIC"这三件套
 
@@ -37,15 +50,6 @@
   与 Hysteria2 分端口，避免互相抢占。
 
 三个同时可用时，客户端侧按网络情况切换即可。
-
-### AnyTLS 的确认方法
-
-不要凭印象说"支持/不支持"，直接查二进制：
-
-```bash
-strings /usr/local/x-ui/bin/xray-linux-amd64 | grep -ci anytls    # → 0
-strings /usr/local/x-ui/bin/xray-linux-amd64 | grep -iE '^(vmess|vless|trojan|hysteria|tuic|wireguard)$' | sort -u
-```
 
 ---
 
@@ -61,11 +65,11 @@ strings /usr/local/x-ui/bin/xray-linux-amd64 | grep -iE '^(vmess|vless|trojan|hy
 | 8443/udp | TUIC v5 | |
 | 2096/tcp | 订阅服务 | |
 | 46821/tcp | 面板 | 建议只对特定 IP 开放，或走域名 |
-| 8080/tcp | HTTP 代理 | 可选。**明文协议**，见 §1 表下说明 |
-| 2080/tcp | SOCKS5（`mixed`） | 可选。⚠️ **不要用 1080，机房会封**（见 §2.1） |
 
-### 2.1 ⚠️ 选端口要避开机房的封禁名单（1080 是最典型的坑）
+### 2.1 ⚠️ 自定义端口时要避开机房的封禁名单（1080 是最典型的坑）
 
+**默认的 443 / 8443 / 2096 / 46821 一般没问题。**
+但只要你想换端口（比如 443 被占用、想多开一条 REALITY），就必须先验一遍 ——
 很多机房在**更上游的位置**封了一批「代理常用端口」。
 表现是：服务端监听正常、iptables 规则正常、VPS 自连正常，**但从公网就是连不上**。
 
@@ -235,7 +239,8 @@ v2rayNG 只有 Xray 内核，无法使用 TUIC / Hysteria2。需要换客户端�
 4. **确认 `sni` 不为空**（见 `xui-api.md` §5.3）
 5. **确认 flow 字段在**：Reality+Vision 必须有 `flow=xtls-rprx-vision`，
    合并订阅后容易丢（见 `xui-api.md` §4.4）
-6. **确认端口真的通**：UDP 端口要单独测（TCP 通不代表 UDP 通）
+6. **确认端口真的通**：TCP 端口先做裸探测（`/dev/tcp/<IP>/<PORT>`，连续 5-10 次），
+   UDP 端口要单独测（TCP 通不代表 UDP 通）。注意**在 VPS 上自测无效**（走 lo，不经 INPUT 链）。
 7. **确认证书**：`openssl s_client -connect <域名>:443 -servername <域名>` 看有效期
 8. **换一个内核完全不同的客户端**交叉验证（Xray 系 vs sing-box 系 vs mihomo 系），
    这一步能最快区分"服务端问题"和"客户端内核问题"。
@@ -256,13 +261,6 @@ v2rayNG 只有 Xray 内核，无法使用 TUIC / Hysteria2。需要换客户端�
 > 结论符合预期：QUIC 系（TUIC / Hysteria2）建连明显快于 TCP+TLS 系。
 > 但**抗封锁能力 REALITY 最强**，所以三者都留着，让用户按场景切换。
 
-**HTTP / SOCKS5 出口稳定性**（2026-10 实测，各连续 10 次）：
-
-| 节点 | 测试方式 | 出口 IP | 成功率 |
-|---|---|---|---|
-| HTTP 代理 | `curl -x http://u:p@IP:8080` | VPS 的 IPv4 | **10/10** |
-| SOCKS5 | `curl --proxy socks5h://u:p@IP:2080` | VPS 的 IPv4 | **10/10** |
-
 ---
 
 ## 6. 选型速查
@@ -278,52 +276,4 @@ v2rayNG 只有 Xray 内核，无法使用 TUIC / Hysteria2。需要换客户端�
 | 客户端是 Clash Verge / Clash Meta | 三个都能用，无需调整 |
 | UDP 被完全封锁的网络 | 只能 REALITY（TCP） |
 | 要接 CDN | VLESS + WS + TLS（本文三件套不适用） |
-| **浏览器插件 / 系统代理 / `HTTP_PROXY` 环境变量** | **HTTP 代理（8080）** |
-| **`curl` / `git` / 需要代理 UDP 的程序** | **SOCKS5（2080）** |
-| **只想给某几个程序走代理，不想改系统设置** | **HTTP 或 SOCKS5，按来源 IP 限制** |
-
----
-
-## 7. HTTP / SOCKS5 补充节点（可选）
-
-当用户提到「加个 http/socks5 代理」「给浏览器/脚本用」「给 Docker 容器用」时，
-除了上面的三件套外，可以额外部署这两个通用代理协议。
-
-### 7.1 用途与边界
-
-| 程序类型 | 用哪个 | 说明 |
-|---|---|---|
-| 浏览器插件（SwitchyOmega 等） | HTTP 8080 或 SOCKS5 2080 | 两者都支持 |
-| Windows / macOS 系统代理 | HTTP 8080 | 系统设置里选「HTTP 代理」 |
-| Docker / 服务器脚本 | HTTP 8080 | 设 `HTTP_PROXY=http://user:pass@IP:8080` |
-| `curl` / `wget` / `git` | SOCKS5 2080 | `socks5h` 可让 DNS 也走代理 |
-| 需要代理 UDP 的程序 | SOCKS5 2080 | 已开 `udp: true`（UDP ASSOCIATE） |
-
-### 7.2 部署要点（详细坑见 `pitfalls.md` §6.5 / §6.6）
-
-1. **协议名用 `mixed`，不是 `socks`** —— 用 `socks` 会 `request body failed validation`。
-   `mixed` 天生就是「HTTP + SOCKS 同端口」。
-2. **端口避开 1080**（机房封锁，改用 2080 之类）。
-3. **必须开认证**，绝不部署开放代理。
-4. **这两个不会出现在订阅里** —— 3x-ui 只为
-   `vmess/vless/trojan/shadowsocks/tuic` 生成链接。交付文档要单独列出。
-
-### 7.3 部署后必做的验证
-
-```bash
-# ① TCP 层裸探测（不走本机任何代理），连续 5-10 次应全 OK
-for i in 1 2 3 4 5; do
-  timeout 5 bash -c "exec 3<>/dev/tcp/<IP>/2080" 2>/dev/null && echo OK || echo TIMEOUT
-done
-
-# ② 端到端：出口应是 VPS 的 IPv4
-curl -s -x "http://user:pass@<IP>:8080" https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|loc)='
-curl -s --proxy "socks5h://user:pass@<IP>:2080" https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|loc)='
-
-# ③ 鉴权必须生效：匿名 / 错密码都该被拒
-curl -s -x "http://<IP>:8080" https://api.ipify.org -o /dev/null -w "%{http_code}\n"   # 不应是 200
-```
-
-> ⚠️ 测试时若本机开着本地代理客户端（如 `127.0.0.1:10808`），
-> `curl -x` 的结果**可能被截胡**导致时通时不通 —— 先看 ① 的裸探测结果再下结论，
-> 详见 `pitfalls.md` §4.6。
+| 想要"填充 + 抗流量特征分析"的新协议（AnyTLS 等） | 3x-ui v3.9.0 不支持，见 §1.1 |

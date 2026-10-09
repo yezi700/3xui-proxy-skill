@@ -14,12 +14,38 @@
 | 会话 | `Cookie: 3x-ui=<session>` | 浏览器登录后自动带 |
 | **API Token** | `Authorization: Bearer <apiToken>` | 脚本首选，不会过期 |
 
-API Token 在面板 **设置 → 安全 → API Token** 里查看/重置，
-也可以从数据库直接读：
+API Token 在面板 **设置 → 安全 → API Token** 里新建/重置。
+
+⚠️ **v3.9.0 起不能从数据库直接读明文**：Token 挪到了独立的 `api_tokens` 表，
+并且**只存 SHA-256 哈希**，明文**只在创建那一刻返回一次**。
+老教程里的 `sqlite3 ... where key='apiToken'` 在 v3.9.0 上返回空。
+
+获取方式（登录会话 + 创建）：
 
 ```bash
-sqlite3 /etc/x-ui/x-ui.db "select value from settings where key='apiToken';"
+BASE="https://127.0.0.1:${PANEL_PORT}/${PANEL_PATH}"
+JAR="$(mktemp)"
+
+# ① CSRF Token
+CSRF="$(curl -sk -c "$JAR" "$BASE/csrf-token" \
+        | python3 -c 'import json,sys;print(json.load(sys.stdin)["obj"])')"
+
+# ② 登录（Cookie 落 $JAR）
+curl -sk -b "$JAR" -c "$JAR" -X POST \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  --data-urlencode "username=${PANEL_USER}" \
+  --data-urlencode "password=${PANEL_PASS}" "$BASE/login" >/dev/null
+
+# ③ 新建 Token，明文在返回体的 obj 里 —— 立刻保存
+curl -sk -b "$JAR" -c "$JAR" -X POST \
+  -H "X-CSRF-Token: $CSRF" -H "Content-Type: application/json" \
+  -d '{"name":"skill"}' "$BASE/panel/api/setting/apiTokens/create"
+# → {"success":true,"obj":"<明文 Token>"}   ← 只出现这一次
 ```
+
+⚠️ ②③ 都要带 `X-CSRF-Token` 头，否则 403。
+⚠️ Token 忘了就**重新建一个**，别想着从库里捞回来。
+详见 `pitfalls.md` §2.7。
 
 ### 1.2 ⚠️ 最大的坑：`webDomain` 启用后的 Host 头校验
 
@@ -286,70 +312,30 @@ payload = {
 `streamSettings` 对 TUIC 基本不用填（证书在 settings.server 里），保持
 `{"network": "tuic", "security": "none"}` 之类的最小结构即可。
 
-### 3.7 HTTP / Mixed（SOCKS5）settings
+### 3.7 支持的协议清单
 
-⚠️ **协议名是 `mixed`，不是 `socks`。** 用 `socks` 建入站会返回
-`request body failed validation`（与 `settings` 内容无关，是协议白名单问题）。
-`mixed` = 「HTTP + SOCKS 同端口」，一个端口两种客户端都能连。
-
-**HTTP 入站**（协议名 `http`）：
-
-```json
-{
-  "accounts": [ { "user": "bowei", "pass": "bowei" } ],
-  "allowTransparent": false
-}
-```
-
-**Mixed 入站**（HTTP + SOCKS5 同端口，协议名 `mixed`）：
-
-```json
-{
-  "auth": "password",
-  "accounts": [ { "user": "bowei", "pass": "bowei" } ],
-  "udp": true
-}
-```
-
-完整 payload 示例：
-
-```python
-payload = {
-    "remark": "JP-SOCKS5-2080", "enable": True, "port": 2080,
-    "protocol": "mixed",                    # ← 不是 "socks"
-    "settings": json.dumps({
-        "auth": "password",
-        "accounts": [{"user": "bowei", "pass": "bowei"}],
-        "udp": True,
-    }, ensure_ascii=False),
-    "streamSettings": json.dumps({"network": "tcp", "security": "none"}),
-    "sniffing": json.dumps({"enabled": True,
-                            "destOverride": ["http", "tls", "quic", "fakedns"]}),
-}
-```
-
-要点：
-
-- ⚠️ **`http` 和 `mixed` 用的是 `accounts`，不是 `clients`**。
-  写 `clients` 数组会被拒；客户端规范化层也不管这两类入站
-  （`/clients/update` 里的 `inboundIds` 加上它们**不会生效**，但不影响使用）。
-- ⚠️ **`pass` 不要留空**。首次用空 `pass` 建完后，建议回读 + 显式更新一次，
-  确保密码真的落库。
-- ⚠️ **端口选 2080 之类，不要用 1080** —— 机房普遍封锁 1080/1081（见 `pitfalls.md` §4.5）。
-- **这两个协议不会出现在 `/inbounds/allLinks` 和订阅里**（见 `pitfalls.md` §6.6）。
-
-### 3.8 支持的协议清单
+3x-ui v3.9.0 的入站协议白名单（面板 HTTP 层实际接受的值）：
 
 ```
 vmess | vless | tunnel | http | trojan | shadowsocks | mixed |
 wireguard | hysteria | mtproto | amneziawg | tuic
 ```
 
-**AnyTLS 不支持**。确认方法（比对字符串，不要靠猜）：
+**AnyTLS 不在其中 —— 加不了。** 确认方法（比对二进制字符串，不要靠猜）：
 
 ```bash
-strings /usr/local/x-ui/bin/xray-linux-amd64 | grep -ci anytls    # → 0
+# ⚠️ Debian 默认没装 strings（见 pitfalls.md §1.4），用 grep -a 代替
+grep -a -o -i -- "anytls" /usr/local/x-ui/bin/xray-linux-amd64 | wc -l   # → 0
+grep -a -o -i -- "anytls" /usr/local/x-ui/x-ui                           | wc -l   # → 0
 ```
+
+> 另有两条**实现位置**的坑，容易误判：
+> - **Hysteria2 在 Xray 里**（`protocol: "hysteria"`），
+>   `grep -a -o -i hysteria xray-linux-amd64 | wc -l` 有大量命中；
+> - **TUIC v5 不在 Xray 里**，由 `x-ui` 面板进程承载（转发给内部 socks 入站
+>   127.0.0.1:64003），所以 Xray 二进制里查不到 `tuic` 属**正常**。
+>
+> 详见 `pitfalls.md` §6.5。
 
 ---
 
@@ -534,7 +520,14 @@ curl -sS -k "${H[@]}" -X POST "$BASE/setting/restartXrayService"
 5. **`cannot unmarshal number into ... .id of type string`** → 回写了 GET 的原始对象（见 §4.3）
 6. **`empty client ID`** → TUIC 客户端缺 `id` 字段（见 §3.6）
 7. **分享链接里是 127.0.0.1** → `shareAddrStrategy` 没设 custom（见 §5.1）
-8. **`request body failed validation`**（建 SOCKS 入站时）→ 协议名要用 `mixed` 不是 `socks`（见 §3.7）
+8. **`request body failed validation`** → 协议名不在白名单里（见 §3.7），
+   或 `settings` 结构写错（VLESS/TUIC 用 `clients`，HTTP/Mixed 用 `accounts`）
 9. **`/clients/attach` 404** → v3.9.0 没有该端点；改用 `POST /clients/update/<email>` 带 `inboundIds`（见 §4.2）
-10. **订阅里少节点** → HTTP / SOCKS5 本来就不生成链接，只有 vmess/vless/trojan/ss/tuic 进订阅（见 §3.7）
+10. **订阅里少节点** → 3x-ui 只为 `vmess/vless/trojan/shadowsocks/tuic` 生成链接，
+    其它协议（http/mixed/wireguard/mtproto 等）**本来就不进订阅**，这是设计如此
 11. **`allLinks` / 订阅返回空** → 订阅端点（2096）同样要带 `Host` 头，否则 403 空响应（见 §1.2）
+12. **API 调用全部成功，但重启 Xray 后节点全挂** →
+    v3.9.0 增删入站走 gRPC 热更新，**不重写 `bin/config.json`**；
+    改完必须 `systemctl restart x-ui`（见 `pitfalls.md` §2.6）
+13. **`sqlite3 ... where key='apiToken'` 读不到 Token** → v3.9.0 只存 SHA-256（见 §1.1）
+14. **想加 AnyTLS** → 3x-ui v3.9.0 不支持，换 sing-box / mihomo 服务端（见 §3.7）
