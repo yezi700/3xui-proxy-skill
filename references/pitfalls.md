@@ -109,6 +109,43 @@ git rm --cached -r . && git reset --hard
 
 3. 应急：在 VPS 上执行前先 `sed -i 's/\r$//' <脚本>`。
 
+#### 1.5.1 ⚠️ `.gitattributes` 加了，但**老的工作区还是 CRLF**，且 `git checkout` 修不动
+
+**现象**：`.gitattributes` 已存在且 `git check-attr` 显示 `eol: lf`，
+HEAD 里的 blob 也确认是纯 LF，但工作区某些文件仍是 CRLF。
+执行 `git checkout -- <文件>` 或 `git checkout-index -f -- <文件>` 后**依然是 CRLF**。
+
+**根因**：这些文件是在 `.gitattributes` 加入**之前**检出的，之后从未重新写过。
+git 比对时会对工作区内容做一次「干净过滤器」（CRLF→LF）再与 index 比较，
+结果判定为"未修改"，于是 `checkout` 认为无需重写 —— 加上 `-f` 也不管用。
+
+**验证方法**（别用 `grep -c $'\r'`，`$'\r'` 展开失败会退化成 `grep -c ''` 匹配所有行）：
+
+```bash
+tr -dc '\r' < <文件> | wc -c        # 工作区 CR 个数
+git cat-file blob HEAD:<文件> | tr -dc '\r' | wc -c   # blob 里的 CR 个数
+```
+
+**修复**（绕过过滤器，直接把 blob 写回工作区）：
+
+```bash
+for f in <受影响的文件...>; do git cat-file blob "HEAD:$f" > "$f"; done
+git add <受影响的文件...>            # 刷新 stat 缓存，此时 blob 未变、无需提交
+```
+
+**判定 `.gitattributes` 到底有没有生效**，要**全新克隆**再看，不要看老工作区：
+
+```bash
+git -c core.autocrlf=true clone <仓库> /tmp/check
+cd /tmp/check
+git ls-files | while read -r f; do
+  c=$(tr -dc '\r' < "$f" | wc -c)
+  [ "$c" -gt 0 ] && echo "CRLF $f ($c)" || echo "LF   $f"
+done
+```
+
+全部输出 `LF` 就说明规则有效（`.sh` / `.py` 尤其重要）。
+
 ---
 
 ## 二、3x-ui 面板 API
