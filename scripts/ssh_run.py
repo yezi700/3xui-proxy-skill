@@ -25,6 +25,8 @@ import argparse
 import io
 import os
 import posixpath
+import re
+import shlex
 import sys
 
 try:
@@ -56,14 +58,16 @@ def load_env() -> dict:
         path = os.path.abspath(path)
         if not os.path.isfile(path):
             continue
-        with open(path, "r", encoding="utf-8") as fh:
+        with open(path, "r", encoding="utf-8-sig") as fh:
             for raw in fh:
                 line = raw.strip()
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 key, _, val = line.partition("=")
                 key = key.strip()
-                val = val.strip().strip('"').strip("'")
+                val = val.strip()
+                if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                    val = val[1:-1]
                 if key:
                     cfg[key] = val
         break  # 只用找到的第一个
@@ -74,8 +78,14 @@ def load_env() -> dict:
         "DOMAIN", "SERVER_IP", "PANEL_PORT", "PANEL_PATH", "PANEL_USER",
         "PANEL_PASS", "SUB_PORT", "SUB_PATH", "API_TOKEN", "CERT_DIR",
         "REALITY_PORT", "HY2_PORT", "TUIC_PORT", "HY2_HOP_RANGE",
+        "NODE_PREFIX", "MERGED_EMAIL", "MERGED_SUBID", "ACME_PORT", "SSH_PORT",
+        "REALITY_DEST", "REALITY_SNI", "REALITY_PRIV", "REALITY_PUB", "REALITY_SID",
+        "DISABLE_IPV6", "DNS_SERVERS", "WITH_HTTP", "WITH_SOCKS", "HTTP_PORT",
+        "SOCKS_PORT", "PROXY_USER", "PROXY_PASS",
+        "VERIFY_REALITY_UUID", "VERIFY_HY2_AUTH", "VERIFY_HY2_OBFS_PW",
+        "VERIFY_TUIC_UUID", "VERIFY_TUIC_PASSWORD", "VERIFY_PROXY_USER", "VERIFY_PROXY_PASS",
     ]:
-        if os.environ.get(key):
+        if key in os.environ:
             cfg[key] = os.environ[key]
 
     return cfg
@@ -142,8 +152,9 @@ def env_exports(cfg: dict) -> str:
     for key, val in cfg.items():
         if not key or not isinstance(val, str):
             continue
-        safe = val.replace("'", "'\\''")
-        lines.append(f"export {key}='{safe}'")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            raise ValueError(f"无效的环境变量名: {key!r}")
+        lines.append(f"export {key}={shlex.quote(val)}")
     return "\n".join(lines)
 
 
@@ -156,7 +167,9 @@ def put_text(cli: paramiko.SSHClient, text: str, remote_path: str) -> None:
             try:
                 sftp.stat(parent)
             except IOError:
-                cli.exec_command(f"mkdir -p {parent}")[1].channel.recv_exit_status()
+                rc = cli.exec_command(f"mkdir -p -- {shlex.quote(parent)}")[1].channel.recv_exit_status()
+                if rc:
+                    raise OSError("无法创建远端脚本目录")
         with sftp.file(remote_path, "w") as fh:
             fh.write(text)
     finally:
@@ -177,6 +190,8 @@ def main() -> int:
 
     if not args.command and not args.file:
         ap.error("必须指定 -c 或 -f")
+    if args.file and not args.file.endswith(".sh"):
+        ap.error("-f 仅支持 Bash .sh 文件；Python 编排脚本请在本地直接运行")
 
     cfg = load_env()
     cli = get_client(cfg)
@@ -200,11 +215,11 @@ def main() -> int:
             content = fh.read()
         put_text(cli, content, remote)
 
-        run(cli, f"chmod +x {remote}", timeout=30)
+        run(cli, f"chmod 700 -- {shlex.quote(remote)}", timeout=30)
         exports = env_exports(cfg)
         rc, out, err = run(
             cli,
-            f"cd /root && {exports}\nbash {remote} 2>&1",
+            f"set -e\ncd /root\n{exports}\nbash {shlex.quote(remote)} 2>&1",
             timeout=args.timeout, pty=args.pty,
         )
         sys.stdout.write(out)
@@ -212,7 +227,7 @@ def main() -> int:
             sys.stderr.write("\n[stderr]\n" + err)
 
         if not args.no_cleanup:
-            run(cli, f"rm -f {remote}", timeout=30)
+            run(cli, f"rm -f -- {shlex.quote(remote)}", timeout=30)
         return rc
     finally:
         cli.close()

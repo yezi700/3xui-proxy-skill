@@ -1,10 +1,11 @@
 ---
 name: 3xui-proxy-skill
 description: 在全新 VPS 上部署 3x-ui 面板与抗封锁代理节点（VLESS-REALITY+Vision / Hysteria2 / TUIC v5），可选追加 HTTP / SOCKS5 通用代理，覆盖非交互安装、Let's Encrypt 证书、iptables 加固、BBR 调优、面板 API 建站、合并订阅与端到端真机验证。当用户要求「搭梯子 / 部署机场节点 / 装 3x-ui / 配 Reality、Hysteria2、TUIC / 加个 http 或 socks5 代理 / 照教程部署代理 / 自建科学上网」时使用。Deploy a censorship-resistant proxy stack (3x-ui panel + VLESS-REALITY, Hysteria2, TUIC v5, optionally HTTP/SOCKS5) on a fresh VPS with non-interactive install, ACME certs, iptables hardening and end-to-end verification.
-description_zh: 在 VPS 上部署 3x-ui 面板与 Reality / Hysteria2 / TUIC 代理节点（可选 HTTP / SOCKS5）
-description_en: Deploy a 3x-ui panel with VLESS-REALITY, Hysteria2, TUIC v5 and optional HTTP/SOCKS5 proxy nodes on a VPS
-version: 1.2.0
-agent_created: true
+metadata:
+  description_zh: 在 VPS 上部署 3x-ui 面板与 Reality / Hysteria2 / TUIC 代理节点（可选 HTTP / SOCKS5）
+  description_en: Deploy a 3x-ui panel with VLESS-REALITY, Hysteria2, TUIC v5 and optional HTTP/SOCKS5 proxy nodes on a VPS
+  version: 1.2.0
+  agent_created: true
 ---
 
 # 3x-ui 代理节点部署
@@ -21,7 +22,7 @@ agent_created: true
 | 3x-ui 面板 | 随机路径 + 随机端口 + Let's Encrypt 证书（HTTPS） |
 | 节点 1：VLESS + REALITY + XTLS-Vision | TCP 443，抗封锁主力，无需自有证书 |
 | 节点 2：Hysteria2 | UDP 443 + 端口跳跃，高丢包链路吞吐最强 |
-| 节点 3：TUIC v5 | UDP 8443，QUIC 0-RTT，延迟最低 |
+| 节点 3：TUIC v5 | UDP 8443，默认关闭 0-RTT 以兼容认证 |
 | 节点 4/5（可选）：HTTP / SOCKS5 | 通用本地代理，给浏览器插件、系统代理、`curl`/`git`、Docker 用 |
 | 一条订阅 URL | 一次返回全部**翻墙**节点（base64） |
 | 交付文档 | 面板凭据、节点参数、防火墙、运维命令、实测数据 |
@@ -43,10 +44,10 @@ agent_created: true
 
 ## 前置条件
 
-必须先从用户处取得（缺一不可，缺失则先问）：
+部署前准备以下信息；域名未准备好时先进入下方准备向导：
 
 1. VPS 公网 IP、SSH 端口、用户名、密码或密钥
-2. 一个已解析到该 IP 的域名（用于申请证书 + 订阅 + REALITY 无关）
+2. 一个指向 VPS 的完整域名，用于面板、证书和订阅；没有域名时按准备向导申请并解析
 3. 期望的面板端口 / 订阅端口（未指定则用默认：面板 46821，订阅 2096）
 
 可选：面板用户名密码、节点数量偏好、是否要 BBR、是否要 fail2ban。
@@ -54,6 +55,19 @@ agent_created: true
 ## 工作流
 
 按顺序执行，**每一步都要验证通过再进入下一步**。
+
+### 准备向导 · 域名与 DNS
+
+先确认用户是否已有域名和 DNS 管理权限。没有域名、不会添加 A 记录或希望使用 Cloudflare 时，读取 [域名与 DNS 引导](references/domain-and-dns.md)，引导免费域名申请 → Cloudflare 可选接入 → NS 激活 → A 记录指向 VPS（灰云）。已有可用 DNS 服务时直接预检，不强制迁移。
+
+注册验证由用户在官方页面完成；不要索取邮箱验证码或把账号注册视为全自动步骤。免费政策以官方页面为准。
+
+```bash
+# 将两个示例值替换为真实节点域名和 VPS IPv4
+python scripts/check_dns.py --domain jp.example.com --ipv4 203.0.113.10
+```
+
+预检不修改 DNS、不读取 deploy.env。默认要求无 AAAA；保留已配置可用 IPv6 时传 `--ipv6` 并设置 `DISABLE_IPV6=0`。退出码非零时先解决诊断问题；结果只证明公共解析器当前返回值，不证明 NS 激活、证书或节点连通性。
 
 ### Step 0 · 准备参数
 
@@ -101,6 +115,8 @@ VPS 若有可用 IPv6，glibc 会优先返回 AAAA，**代理出口就变成 IPv
 
 ### Step 3 · 安装面板 + 申请证书
 
+用实际 DOMAIN / SERVER_IP 再运行一次 DNS 预检，确认解析符合预期后继续。
+
 ```bash
 python scripts/ssh_run.py -f scripts/install_3xui.sh
 ```
@@ -111,7 +127,7 @@ python scripts/ssh_run.py -f scripts/install_3xui.sh
 ### Step 4 · 创建节点
 
 ```bash
-python scripts/ssh_run.py -f scripts/deploy_nodes.py
+python scripts/deploy_nodes.py
 ```
 
 创建 3 个入站（Reality / Hysteria2 / TUIC），并生成随机凭据。
@@ -123,7 +139,7 @@ python scripts/ssh_run.py -f scripts/deploy_nodes.py
 python scripts/fix_tuic_0rtt.py
 ```
 
-把 TUIC 入站的 `zero_rtt_handshake` 关掉（默认是 `true`）。
+新建 TUIC 入站已默认关闭 `zero_rtt_handshake`；此步骤用于检查、修复旧入站。
 
 **为什么必须做**：3x-ui 的 TUIC 认证依赖 TLS Keying Material Exporter，
 而 `internal/tuic/auth.go` 里有 `if !cs.HandshakeComplete { return ErrInvalidTLSState }`。
@@ -166,12 +182,13 @@ PROXY_USER=bowei PROXY_PASS='<强密码>' \
 ### Step 5 · 合并订阅
 
 ```bash
-python scripts/ssh_run.py -f scripts/merge_subscription.py
+python scripts/merge_subscription.py
 ```
 
 3x-ui v3.9.0 起 `subId` **全局唯一**，无法靠共享 subId 合并订阅。
 正确做法是**一个客户端身份绑定多个入站**（`/panel/api/clients/add` + `inboundIds:[...]`），
-这样一条订阅 URL 就能返回全部节点。
+这样一条订阅 URL 就能返回全部节点。合并脚本保留原客户端；仅在从外部验证新订阅可用后，按用户要求清理旧身份。
+合并失败会以非零状态退出；重复运行若遇到已有 email/subId，应先回读核对，不能盲目删除后重建。
 
 ### Step 6 · 放行端口
 
@@ -239,6 +256,7 @@ python scripts/render_report.py -o .
 
 | 文件 | 何时读 |
 |---|---|
+| `references/domain-and-dns.md` | 未准备域名、接入 Cloudflare、添加 A/AAAA 或 DNS 预检失败时 |
 | `references/pitfalls.md` | **每次部署都读**——汇集了 30+ 个实际踩过的坑与修复方式 |
 | `references/xui-api.md` | 需要直接调面板 API 时（字段结构、鉴权、客户端模型、http/mixed 入站结构） |
 | `references/protocols-and-clients.md` | 选协议、排查"某客户端连不上"、写交付文档的兼容性矩阵、部署 HTTP/SOCKS5 时 |
@@ -248,6 +266,7 @@ python scripts/render_report.py -o .
 
 | 脚本 | 作用 |
 |---|---|
+| `scripts/check_dns.py` | 只读检查两个公共 DNS 服务的 A/AAAA 是否符合预期 |
 | `scripts/ssh_run.py` | 通用 SSH 执行器（跑单条命令或整个脚本文件，自动注入 `deploy.env`） |
 | `scripts/xui_api.py` | 面板 API 客户端（自动处理 Host 头、Bearer 鉴权；也可当 CLI 用） |
 | `scripts/setup_base.sh` | 系统基线：时区、依赖、iptables 白名单、屏蔽 IPv6、BBR（带 180 秒回滚保险） |
