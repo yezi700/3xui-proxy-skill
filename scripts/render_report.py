@@ -26,7 +26,7 @@ import sys
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ssh_run import get_client, load_env, run  # noqa: E402
+from ssh_run import env_exports, get_client, load_env, run  # noqa: E402
 
 COLLECT = r"""
 set -uo pipefail
@@ -472,15 +472,18 @@ def main() -> int:
 
     cli = get_client(cfg)
     try:
-        exports = "\n".join(
-            "export %s='%s'" % (k, cfg.get(k, ""))
-            for k in ("DOMAIN", "PANEL_PORT", "PANEL_PATH", "API_TOKEN",
-                      "SUB_PORT", "MERGED_SUBID", "MERGED_EMAIL")
-        )
+        exports = env_exports({k: cfg.get(k, "") for k in (
+            "DOMAIN", "PANEL_PORT", "PANEL_PATH", "API_TOKEN", "SUB_PORT",
+            "MERGED_SUBID", "MERGED_EMAIL"
+        )})
         rc, out, err = run(cli, f"{exports}\nbash -s <<'EOS'\n{COLLECT}\nEOS",
                            timeout=180)
     finally:
         cli.close()
+
+    if rc:
+        sys.stderr.write(err or "远端信息采集失败，未生成交付文档\n")
+        return rc
 
     sec = parse_sections(out)
     install = kv_block(sec.get("INSTALL", ""))

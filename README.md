@@ -174,6 +174,24 @@ git archive --format=zip --prefix=3xui-proxy-skill/ \
 pip install paramiko
 ```
 
+## 开发与验证
+
+```bash
+python -m pip install paramiko
+python -m unittest discover -s tests -v
+python -m compileall -q scripts tests
+```
+
+测试在本地模拟 SSH 与面板响应，不连接真实 VPS。Bash 行为测试在 Linux/macOS
+使用 `bash`，Windows 使用 Git for Windows 的 Bash；未安装时会跳过对应测试。
+建议在 Linux CI 中对 Python 3.8 / 3.11 / 3.13 运行上述完整测试。
+
+部署入口：`deploy_nodes.py`、`merge_subscription.py` 在本地直接用 Python 运行，
+它们内部负责 SSH 编排；`ssh_run.py -f` 仅用于 `.sh` 脚本。
+部署和合并遇到失败会停止并返回非零状态；停止不等于自动回滚，重试前应回读已有入站。
+合并仅选择配置端口对应的三个入站，并保留原客户端；从外部验证新订阅后再按需清理旧身份。
+新建 TUIC 已默认关闭 0-RTT，`fix_tuic_0rtt.py` 用于修复旧入站。
+
 ## 安全说明
 
 - 脚本会以 root 身份在你的 VPS 上执行命令（安装软件、改防火墙、写 systemd 服务）——

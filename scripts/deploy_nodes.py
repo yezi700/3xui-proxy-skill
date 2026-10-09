@@ -27,7 +27,8 @@ import sys
 import uuid as uuidlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ssh_run import get_client, load_env, run  # noqa: E402
+from ssh_run import env_exports, get_client, load_env, run
+from xui_api import XuiApi  # noqa: E402
 
 AL = string.ascii_letters + string.digits
 LOW = string.ascii_lowercase + string.digits
@@ -158,7 +159,6 @@ def build_hysteria(cfg: dict, cred: dict) -> dict:
                 "settings": {
                     "allowInsecure": False,
                     "fingerprint": "chrome",
-                    "serverName": "",
                 },
             },
             "finalmask": {
@@ -200,7 +200,7 @@ def build_tuic(cfg: dict, cred: dict) -> dict:
                 "congestion_control": "bbr",
                 "alpn": ["h3"],
                 "udp_relay_mode": "native",
-                "zero_rtt_handshake": True,
+                "zero_rtt_handshake": False,
                 "log_level": "info",
                 "max_idle_time": 15,
                 "authentication_timeout": 3,
@@ -242,7 +242,14 @@ def build_tuic(cfg: dict, cred: dict) -> dict:
 # ---------------------------------------------------------------- 远端脚本
 
 REMOTE_SCRIPT = r"""
-set -uo pipefail
+set -euo pipefail
+umask 077
+api_check() {
+  python3 -c 'import json,sys
+r=json.load(sys.stdin)
+if not isinstance(r, dict) or r.get("success") is not True:
+    raise SystemExit("面板操作失败: " + str(r.get("msg", "")) if isinstance(r, dict) else "面板响应格式错误")'
+}
 export DEBIAN_FRONTEND=noninteractive
 BASE="https://127.0.0.1:${PANEL_PORT}/${PANEL_PATH}/panel/api"
 H1="Host: ${DOMAIN}"
@@ -272,6 +279,7 @@ echo "PRIV=$PRIV"
 echo "PUB=$PUB"
 if [ -z "$PRIV" ] || [ -z "$PUB" ]; then
   echo "!!! 无法解析 x25519 输出，请手动执行 $XRAY_BIN x25519 后填入 deploy.env 的 REALITY_PRIV / REALITY_PUB"
+  exit 1
 fi
 
 # 用真实密钥覆盖 payload 里的占位符
@@ -283,15 +291,15 @@ echo "=== 2. 写入入站 ==="
 for pair in "reality:in_reality.json" "hy2:in_hy2.json" "tuic:in_tuic.json"; do
   name="${pair%%:*}"; file="${pair##*:}"
   echo "--- add $name ---"
-  RESP="$(curl -sk -X POST -H "$H1" -H "$AUTH" \
+  RESP="$(curl -fskS -X POST -H "$H1" -H "$AUTH" \
        -H 'Content-Type: application/json' \
        --data-binary @"$file" "$BASE/inbounds/add")"
-  echo "$RESP" | head -c 600; echo
-  echo "$RESP" | grep -q '"success":true' || echo "!!! $name 添加失败"
+  printf '%.600s\n' "$RESP"
+  printf '%s\n' "$RESP" | api_check
 done
 
 echo "=== 3. 当前入站列表 ==="
-curl -sk -H "$H1" -H "$AUTH" "$BASE/inbounds/list" \
+curl -fskS -H "$H1" -H "$AUTH" "$BASE/inbounds/list" \
   | python3 -c 'import json,sys
 d=json.load(sys.stdin)
 for ib in (d.get("obj") or []):
@@ -300,7 +308,7 @@ for ib in (d.get("obj") or []):
           ib.get("protocol"), ib.get("port"), len(s.get("clients") or [])))'
 
 echo "=== 4. 设置分享地址 ==="
-curl -sk -H "$H1" -H "$AUTH" -X POST "$BASE/setting/all" > /root/.xui-skill/settings.json
+curl -fskS -H "$H1" -H "$AUTH" -X POST "$BASE/setting/all" > /root/.xui-skill/settings.json
 # ⚠️ /setting/all 是 POST；/setting/update 是整体覆盖，必须拿全量改完再回写。
 # ⚠️ heredoc 用引号定界符时 bash 不展开 ${VAR}，域名靠 sys.argv 传入。
 python3 - "$DOMAIN" <<'PYEOF'
@@ -308,25 +316,28 @@ import json, sys
 domain = sys.argv[1]
 p = "/root/.xui-skill/settings.json"
 d = json.load(open(p))
-obj = d.get("obj") or {}
+if d.get("success") is not True or not isinstance(d.get("obj"), dict) or not d["obj"]:
+    raise SystemExit("读取完整设置失败，停止覆盖")
+obj = d["obj"]
 obj["shareAddrStrategy"] = "custom"
 obj["shareAddr"] = domain
 json.dump(obj, open("/root/.xui-skill/settings.new.json", "w"))
 print("shareAddr ->", domain, "| 键数:", len(obj))
 PYEOF
-curl -sk -X POST -H "$H1" -H "$AUTH" -H 'Content-Type: application/json' \
-  --data-binary @/root/.xui-skill/settings.new.json "$BASE/setting/update" | head -c 300
+curl -fskS -X POST -H "$H1" -H "$AUTH" -H 'Content-Type: application/json' \
+  --data-binary @/root/.xui-skill/settings.new.json "$BASE/setting/update" | api_check
 echo
 
 echo "=== 5. 重启 Xray ==="
-curl -sk -X POST -H "$H1" -H "$AUTH" "$BASE/setting/restartXrayService" | head -c 200
+curl -fskS -X POST -H "$H1" -H "$AUTH" "$BASE/setting/restartXrayService" | api_check
 echo
 systemctl restart x-ui
 sleep 8
-echo "x-ui: $(systemctl is-active x-ui)"
+systemctl is-active --quiet x-ui
+echo "x-ui: active"
 
 echo "=== 6. 分享链接 ==="
-curl -sk -H "$H1" -H "$AUTH" "$BASE/inbounds/allLinks" \
+curl -fskS -H "$H1" -H "$AUTH" "$BASE/inbounds/allLinks" \
   | python3 -c 'import json,sys
 d=json.load(sys.stdin)
 for it in (d.get("obj") or []):
@@ -380,10 +391,10 @@ def main() -> int:
         run(cli, "mkdir -p /root/.xui-skill", timeout=30)
         # 写 payload（保持 __REALITY_PRIV__ 占位符，由远端 sed 替换）
         for name, obj in payloads.items():
-            encoded = b64(obj)
+            encoded = b64(XuiApi._encode(obj))
             rc, out, err = run(
                 cli,
-                f"echo '{encoded}' | base64 -d > /root/.xui-skill/{name}",
+                f"umask 077; echo '{encoded}' | base64 -d > /root/.xui-skill/{name}",
                 timeout=60,
             )
             if rc != 0:
@@ -392,15 +403,16 @@ def main() -> int:
             print(f"已写入 payload: {name}")
 
         # 写远端执行脚本
-        encoded_script = b64(REMOTE_SCRIPT)
-        run(cli, f"echo '{encoded_script}' | base64 -d > /root/.xui-skill/_deploy.sh",
-            timeout=60)
+        encoded_script = base64.b64encode(REMOTE_SCRIPT.encode("utf-8")).decode("ascii")
+        rc, out, err = run(cli, f"umask 077; echo '{encoded_script}' | base64 -d > /root/.xui-skill/_deploy.sh",
+                           timeout=60)
+        if rc:
+            sys.stderr.write(err)
+            return rc
 
-        exports = "\n".join(
-            f"export {k}='{v}'" for k, v in cfg.items()
-            if k in ("PANEL_PORT", "PANEL_PATH", "DOMAIN", "API_TOKEN",
-                     "PANEL_USER", "SERVER_IP")
-        )
+        exports = env_exports({k: cfg[k] for k in (
+            "PANEL_PORT", "PANEL_PATH", "DOMAIN", "API_TOKEN", "PANEL_USER", "SERVER_IP"
+        ) if k in cfg})
         rc, out, err = run(
             cli, f"{exports}\nbash /root/.xui-skill/_deploy.sh 2>&1",
             timeout=600,
@@ -409,21 +421,37 @@ def main() -> int:
         if err.strip():
             sys.stderr.write("\n[stderr]\n" + err)
 
-        # 回读真实公钥（远端生成后写回文件）
-        rc, pub_out, _ = run(
+        if rc:
+            return rc
+
+        # API payload 的 streamSettings 是 JSON 字符串，不能用 grep 解析。
+        rc, key_out, err = run(
             cli,
-            "grep -o '\"publicKey\"[^,]*' /root/.xui-skill/in_reality.json "
-            "| head -1",
+            "python3 - <<'PYEOF'\n"
+            "import json\n"
+            "with open('/root/.xui-skill/in_reality.json') as f: p = json.load(f)\n"
+            "r = json.loads(p['streamSettings'])['realitySettings']\n"
+            "print(json.dumps({'reality_priv': r['privateKey'], "
+            "'reality_pub': r['settings']['publicKey']}))\nPYEOF",
             timeout=30,
         )
-        if pub_out.strip():
-            cred["reality_pub"] = pub_out.split(":")[1].strip().strip('"')
+        if rc:
+            sys.stderr.write(err)
+            return rc
+        keys = json.loads(key_out)
+        if not keys.get("reality_priv") or not keys.get("reality_pub"):
+            sys.stderr.write("无法回读 REALITY 密钥，停止保存凭据\n")
+            return 1
+        cred.update(keys)
 
         # 保存凭据到远端
-        run(cli, "cat > /root/.xui-skill/node-credentials.json <<'EOF'\n"
+        rc, out, err = run(cli, "umask 077; cat > /root/.xui-skill/node-credentials.json <<'EOF'\n"
                  + json.dumps(cred, ensure_ascii=False, indent=2)
                  + "\nEOF\nchmod 600 /root/.xui-skill/node-credentials.json",
             timeout=30)
+        if rc:
+            sys.stderr.write(err)
+            return rc
     finally:
         cli.close()
 

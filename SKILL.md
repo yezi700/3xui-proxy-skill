@@ -1,10 +1,11 @@
 ---
 name: 3xui-proxy-skill
 description: 在全新 VPS 上部署 3x-ui 面板与抗封锁代理节点（VLESS-REALITY+Vision / Hysteria2 / TUIC v5），可选追加 HTTP / SOCKS5 通用代理，覆盖非交互安装、Let's Encrypt 证书、iptables 加固、BBR 调优、面板 API 建站、合并订阅与端到端真机验证。当用户要求「搭梯子 / 部署机场节点 / 装 3x-ui / 配 Reality、Hysteria2、TUIC / 加个 http 或 socks5 代理 / 照教程部署代理 / 自建科学上网」时使用。Deploy a censorship-resistant proxy stack (3x-ui panel + VLESS-REALITY, Hysteria2, TUIC v5, optionally HTTP/SOCKS5) on a fresh VPS with non-interactive install, ACME certs, iptables hardening and end-to-end verification.
-description_zh: 在 VPS 上部署 3x-ui 面板与 Reality / Hysteria2 / TUIC 代理节点（可选 HTTP / SOCKS5）
-description_en: Deploy a 3x-ui panel with VLESS-REALITY, Hysteria2, TUIC v5 and optional HTTP/SOCKS5 proxy nodes on a VPS
-version: 1.2.0
-agent_created: true
+metadata:
+  description_zh: 在 VPS 上部署 3x-ui 面板与 Reality / Hysteria2 / TUIC 代理节点（可选 HTTP / SOCKS5）
+  description_en: Deploy a 3x-ui panel with VLESS-REALITY, Hysteria2, TUIC v5 and optional HTTP/SOCKS5 proxy nodes on a VPS
+  version: 1.2.0
+  agent_created: true
 ---
 
 # 3x-ui 代理节点部署
@@ -21,7 +22,7 @@ agent_created: true
 | 3x-ui 面板 | 随机路径 + 随机端口 + Let's Encrypt 证书（HTTPS） |
 | 节点 1：VLESS + REALITY + XTLS-Vision | TCP 443，抗封锁主力，无需自有证书 |
 | 节点 2：Hysteria2 | UDP 443 + 端口跳跃，高丢包链路吞吐最强 |
-| 节点 3：TUIC v5 | UDP 8443，QUIC 0-RTT，延迟最低 |
+| 节点 3：TUIC v5 | UDP 8443，默认关闭 0-RTT 以兼容认证 |
 | 节点 4/5（可选）：HTTP / SOCKS5 | 通用本地代理，给浏览器插件、系统代理、`curl`/`git`、Docker 用 |
 | 一条订阅 URL | 一次返回全部**翻墙**节点（base64） |
 | 交付文档 | 面板凭据、节点参数、防火墙、运维命令、实测数据 |
@@ -111,7 +112,7 @@ python scripts/ssh_run.py -f scripts/install_3xui.sh
 ### Step 4 · 创建节点
 
 ```bash
-python scripts/ssh_run.py -f scripts/deploy_nodes.py
+python scripts/deploy_nodes.py
 ```
 
 创建 3 个入站（Reality / Hysteria2 / TUIC），并生成随机凭据。
@@ -123,7 +124,7 @@ python scripts/ssh_run.py -f scripts/deploy_nodes.py
 python scripts/fix_tuic_0rtt.py
 ```
 
-把 TUIC 入站的 `zero_rtt_handshake` 关掉（默认是 `true`）。
+新建 TUIC 入站已默认关闭 `zero_rtt_handshake`；此步骤用于检查、修复旧入站。
 
 **为什么必须做**：3x-ui 的 TUIC 认证依赖 TLS Keying Material Exporter，
 而 `internal/tuic/auth.go` 里有 `if !cs.HandshakeComplete { return ErrInvalidTLSState }`。
@@ -166,12 +167,13 @@ PROXY_USER=bowei PROXY_PASS='<强密码>' \
 ### Step 5 · 合并订阅
 
 ```bash
-python scripts/ssh_run.py -f scripts/merge_subscription.py
+python scripts/merge_subscription.py
 ```
 
 3x-ui v3.9.0 起 `subId` **全局唯一**，无法靠共享 subId 合并订阅。
 正确做法是**一个客户端身份绑定多个入站**（`/panel/api/clients/add` + `inboundIds:[...]`），
-这样一条订阅 URL 就能返回全部节点。
+这样一条订阅 URL 就能返回全部节点。合并脚本保留原客户端；仅在从外部验证新订阅可用后，按用户要求清理旧身份。
+合并失败会以非零状态退出；重复运行若遇到已有 email/subId，应先回读核对，不能盲目删除后重建。
 
 ### Step 6 · 放行端口
 

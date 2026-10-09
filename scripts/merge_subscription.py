@@ -27,10 +27,17 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ssh_run import get_client, load_env, run  # noqa: E402
+from ssh_run import env_exports, get_client, load_env, run  # noqa: E402
 
 REMOTE_SCRIPT = r"""
-set -uo pipefail
+set -euo pipefail
+umask 077
+api_check() {
+  python3 -c 'import json,sys
+r=json.load(sys.stdin)
+if not isinstance(r, dict) or r.get("success") is not True:
+    raise SystemExit("面板操作失败: " + str(r.get("msg", "")) if isinstance(r, dict) else "面板响应格式错误")'
+}
 BASE="https://127.0.0.1:${PANEL_PORT}/${PANEL_PATH}/panel/api"
 H1="Host: ${DOMAIN}"
 AUTH="Authorization: Bearer ${API_TOKEN}"
@@ -51,16 +58,22 @@ echo "hy2_auth      = $HY2_AUTH"
 echo "tuic_password = $TUIC_PASSWORD"
 
 echo "=== 2. 收集入站 ID ==="
-curl -sk -H "$H1" -H "$AUTH" "$BASE/inbounds/list" > /root/.xui-skill/inbounds.json
+curl -fskS -H "$H1" -H "$AUTH" "$BASE/inbounds/list" > /root/.xui-skill/inbounds.json
 python3 - <<'PYEOF'
-import json
+import json, os
 d = json.load(open("/root/.xui-skill/inbounds.json"))
+if d.get("success") is not True:
+    raise SystemExit("读取入站失败")
 ids = []
+expected = {"vless": int(os.environ["REALITY_PORT"]),
+            "hysteria": int(os.environ["HY2_PORT"]), "tuic": int(os.environ["TUIC_PORT"])}
 for ib in (d.get("obj") or []):
-    if ib.get("protocol") in ("vless", "hysteria", "tuic"):
+    if ib.get("protocol") in expected and ib.get("port") == expected[ib["protocol"]]:
         ids.append(ib.get("id"))
         print("#%s %s/%s %s" % (ib.get("id"), ib.get("protocol"),
                                 ib.get("port"), ib.get("remark")))
+if len(ids) != 3 or len(set(ids)) != 3:
+    raise SystemExit("必须找到配置端口对应的三个入站，停止合并")
 open("/root/.xui-skill/ids.txt", "w").write(",".join(str(i) for i in ids))
 PYEOF
 IDS="$(cat /root/.xui-skill/ids.txt)"
@@ -96,35 +109,32 @@ print(json.dumps({
 PYEOF
 cat /root/.xui-skill/merge.json; echo
 
-RESP="$(curl -sk -X POST -H "$H1" -H "$AUTH" -H 'Content-Type: application/json' \
+RESP="$(curl -fskS -X POST -H "$H1" -H "$AUTH" -H 'Content-Type: application/json' \
         --data-binary @/root/.xui-skill/merge.json "$CB/add")"
-echo "$RESP" | head -c 600; echo
-echo "$RESP" | grep -q '"success":true' || echo "!!! 合并客户端创建失败"
+printf '%.600s\n' "$RESP"
+printf '%s\n' "$RESP" | api_check
 
-echo "=== 4. 删除各入站上的原始客户端 ==="
-for e in "reality-${REALITY_PORT}" "hy2-${HY2_PORT}" "tuic-${TUIC_PORT}"; do
-  echo -n "del $e -> "
-  curl -sk -X POST -H "$H1" -H "$AUTH" "$CB/del/$e" | head -c 200; echo
-done
+echo "=== 4. 保留原始客户端，待外部验证新订阅后再按需清理 ==="
 
 echo "=== 5. 校验 flow 是否保留 ==="
-curl -sk -H "$H1" -H "$AUTH" "$CB/get/${MERGED_EMAIL}" \
+curl -fskS -H "$H1" -H "$AUTH" "$CB/get/${MERGED_EMAIL}" \
   | python3 -c 'import json,sys
 d=json.load(sys.stdin)
 o=d.get("obj") or {}
 print("email=%s flow=%r id=%s" % (o.get("email"), o.get("flow"), o.get("id")))
-if not o.get("flow"):
-    print("!!! flow 丢失，需要补 update")'
+if d.get("success") is not True or o.get("flow") != "xtls-rprx-vision":
+    raise SystemExit("合并客户端回读失败或 flow 丢失；原客户端保持不变")'
 
 echo "=== 6. 重启 Xray ==="
-curl -sk -X POST -H "$H1" -H "$AUTH" "$BASE/setting/restartXrayService" | head -c 200
+curl -fskS -X POST -H "$H1" -H "$AUTH" "$BASE/setting/restartXrayService" | api_check
 echo
 systemctl restart x-ui
 sleep 8
-echo "x-ui: $(systemctl is-active x-ui)"
+systemctl is-active --quiet x-ui
+echo "x-ui: active"
 
 echo "=== 7. 合并后的分享链接 ==="
-curl -sk -H "$H1" -H "$AUTH" "$BASE/inbounds/allLinks" \
+curl -fskS -H "$H1" -H "$AUTH" "$BASE/inbounds/allLinks" \
   | python3 -c 'import json,sys
 d=json.load(sys.stdin)
 for it in (d.get("obj") or []):
@@ -132,7 +142,7 @@ for it in (d.get("obj") or []):
 
 echo "=== 8. 订阅内容 ==="
 echo "订阅地址: https://${DOMAIN}:${SUB_PORT}/${SUB_PATH}/${MERGED_SUBID}"
-curl -sk "https://127.0.0.1:${SUB_PORT}/${SUB_PATH}/${MERGED_SUBID}" \
+curl -fskS "https://127.0.0.1:${SUB_PORT}/${SUB_PATH}/${MERGED_SUBID}" \
   -H "$H1" -o /root/.xui-skill/sub.txt -w "HTTP %{http_code}\n"
 echo "--- 解码后 ---"
 base64 -d /root/.xui-skill/sub.txt 2>/dev/null \
@@ -168,15 +178,16 @@ def main() -> int:
     cli = get_client(cfg)
     try:
         encoded = base64.b64encode(REMOTE_SCRIPT.encode("utf-8")).decode("ascii")
-        run(cli, f"echo '{encoded}' | base64 -d > /root/.xui-skill/_merge.sh",
-            timeout=60)
+        rc, out, err = run(cli, f"umask 077; echo '{encoded}' | base64 -d > /root/.xui-skill/_merge.sh",
+                           timeout=60)
+        if rc:
+            sys.stderr.write(err)
+            return rc
 
         keys = ("PANEL_PORT", "PANEL_PATH", "DOMAIN", "API_TOKEN", "SUB_PORT",
                 "SUB_PATH", "MERGED_EMAIL", "MERGED_SUBID", "REALITY_PORT",
                 "HY2_PORT", "TUIC_PORT")
-        exports = "\n".join(
-            "export %s='%s'" % (k, cfg.get(k, "")) for k in keys
-        )
+        exports = env_exports({k: cfg.get(k, "") for k in keys})
         rc, out, err = run(
             cli, f"{exports}\nbash /root/.xui-skill/_merge.sh 2>&1",
             timeout=600,
@@ -186,6 +197,9 @@ def main() -> int:
             sys.stderr.write("\n[stderr]\n" + err)
     finally:
         cli.close()
+
+    if rc:
+        return rc
 
     print("\n" + "=" * 64)
     print("合并结果")
