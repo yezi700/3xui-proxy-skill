@@ -44,10 +44,10 @@ metadata:
 
 ## 前置条件
 
-必须先从用户处取得（缺一不可，缺失则先问）：
+部署前准备以下信息；域名未准备好时先进入下方准备向导：
 
 1. VPS 公网 IP、SSH 端口、用户名、密码或密钥
-2. 一个已解析到该 IP 的域名（用于申请证书 + 订阅 + REALITY 无关）
+2. 一个指向 VPS 的完整域名，用于面板、证书和订阅；没有域名时按准备向导申请并解析
 3. 期望的面板端口 / 订阅端口（未指定则用默认：面板 46821，订阅 2096）
 
 可选：面板用户名密码、节点数量偏好、是否要 BBR、是否要 fail2ban。
@@ -55,6 +55,19 @@ metadata:
 ## 工作流
 
 按顺序执行，**每一步都要验证通过再进入下一步**。
+
+### 准备向导 · 域名与 DNS
+
+先确认用户是否已有域名和 DNS 管理权限。没有域名、不会添加 A 记录或希望使用 Cloudflare 时，读取 [域名与 DNS 引导](references/domain-and-dns.md)，引导免费域名申请 → Cloudflare 可选接入 → NS 激活 → A 记录指向 VPS（灰云）。已有可用 DNS 服务时直接预检，不强制迁移。
+
+注册验证由用户在官方页面完成；不要索取邮箱验证码或把账号注册视为全自动步骤。免费政策以官方页面为准。
+
+```bash
+# 将两个示例值替换为真实节点域名和 VPS IPv4
+python scripts/check_dns.py --domain jp.example.com --ipv4 203.0.113.10
+```
+
+预检不修改 DNS、不读取 deploy.env。默认要求无 AAAA；保留已配置可用 IPv6 时传 `--ipv6` 并设置 `DISABLE_IPV6=0`。退出码非零时先解决诊断问题；结果只证明公共解析器当前返回值，不证明 NS 激活、证书或节点连通性。
 
 ### Step 0 · 准备参数
 
@@ -101,6 +114,8 @@ VPS 若有可用 IPv6，glibc 会优先返回 AAAA，**代理出口就变成 IPv
 不需要屏蔽 IPv6 时把 `deploy.env` 里 `DISABLE_IPV6` 设为 `0`。详见 `references/pitfalls.md` §4.4。
 
 ### Step 3 · 安装面板 + 申请证书
+
+用实际 DOMAIN / SERVER_IP 再运行一次 DNS 预检，确认解析符合预期后继续。
 
 ```bash
 python scripts/ssh_run.py -f scripts/install_3xui.sh
@@ -241,6 +256,7 @@ python scripts/render_report.py -o .
 
 | 文件 | 何时读 |
 |---|---|
+| `references/domain-and-dns.md` | 未准备域名、接入 Cloudflare、添加 A/AAAA 或 DNS 预检失败时 |
 | `references/pitfalls.md` | **每次部署都读**——汇集了 30+ 个实际踩过的坑与修复方式 |
 | `references/xui-api.md` | 需要直接调面板 API 时（字段结构、鉴权、客户端模型、http/mixed 入站结构） |
 | `references/protocols-and-clients.md` | 选协议、排查"某客户端连不上"、写交付文档的兼容性矩阵、部署 HTTP/SOCKS5 时 |
@@ -250,6 +266,7 @@ python scripts/render_report.py -o .
 
 | 脚本 | 作用 |
 |---|---|
+| `scripts/check_dns.py` | 只读检查两个公共 DNS 服务的 A/AAAA 是否符合预期 |
 | `scripts/ssh_run.py` | 通用 SSH 执行器（跑单条命令或整个脚本文件，自动注入 `deploy.env`） |
 | `scripts/xui_api.py` | 面板 API 客户端（自动处理 Host 头、Bearer 鉴权；也可当 CLI 用） |
 | `scripts/setup_base.sh` | 系统基线：时区、依赖、iptables 白名单、屏蔽 IPv6、BBR（带 180 秒回滚保险） |

@@ -60,13 +60,27 @@ git archive --format=zip --prefix=3xui-proxy-skill/ \
 > 也可以直接用 skill-creator 的 `package_skill.py`，但它**不过滤 `.git` 与 `__pycache__`**，
 > 建议在干净的检出目录上执行，或改用上面的 `git archive`。
 
+## 第一次部署：先准备域名
+
+还没有域名或不会解析？先看 [域名申请、Cloudflare 接入与 DNS 引导](references/domain-and-dns.md)：
+申请免费域名 → 注册 Cloudflare（可选）→ 修改 NS → 添加指向 VPS 的 A 记录（灰云）→ DNS 预检。
+已有可用域名时直接检查解析，无需重新注册或迁移 DNS。
+
+```bash
+# 替换为实际完整域名和 VPS 公网 IPv4；示例 IP 不可用于部署
+python scripts/check_dns.py --domain jp.example.com --ipv4 203.0.113.10
+```
+
+预检仅使用 Python 标准库，无需凭据，不改 DNS；默认要求没有 AAAA。
+免费域名可能需要续期，实际规则以服务商说明为准。
+
 ## 使用
 
 在对话里直接说需求即可，例如：
 
 > 帮我在这台 VPS 上部署 3x-ui 和 Reality / Hysteria2 节点：`1.2.3.4` `22` `root` `密码`，域名 `jp.example.com` 已解析
 
-skill 会自动按 Step 0→8 执行：探测环境 → 系统基线 → 装面板+证书 → 建节点 → 合并订阅 →
+skill 会先按需引导域名准备与 DNS 预检，再按 Step 0→8 执行：探测环境 → 系统基线 → 装面板+证书 → 建节点 → 合并订阅 →
 放行端口 → 端到端验证 → 生成交付文档。
 
 也可以只调用其中一步，例如"给这个面板再加一个 TUIC 节点"。
@@ -80,11 +94,13 @@ skill 会自动按 Step 0→8 执行：探测环境 → 系统基线 → 装面�
 ├── LICENSE
 ├── .gitignore
 ├── references/
+│   ├── domain-and-dns.md                 # 免费域名、Cloudflare、A/AAAA 与预检
 │   ├── pitfalls.md                       # 踩坑大全（核心价值）
 │   ├── xui-api.md                        # 3x-ui API 备忘
 │   ├── protocols-and-clients.md          # 协议选型 + 客户端兼容性矩阵
 │   └── install-env.md                    # 非交互安装参数
 ├── scripts/
+│   ├── check_dns.py                      # 只读 DNS 预检（标准库）
 │   ├── ssh_run.py                        # SSH 执行器
 │   ├── xui_api.py                        # 面板 API 客户端
 │   ├── setup_base.sh                     # 系统基线（含屏蔽 IPv6）
