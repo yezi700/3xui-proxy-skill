@@ -76,10 +76,10 @@ curl -sS -k \
 | `/clients/list` | GET | 客户端列表（v3.9.0 规范化表） |
 | `/clients/get/:email` | GET | 单客户端 |
 | `/clients/add` | POST | 新增客户端并可绑定多个入站 |
-| `/clients/update/:email` | POST | 更新客户端 |
+| `/clients/update/:email` | POST | 更新客户端（带 `inboundIds` 可改绑定） |
 | `/clients/del/:email` | POST | 删除客户端 |
-| `/clients/attach` | POST | 把已有客户端绑到入站 |
-| `/clients/detach` | POST | 解绑 |
+| ~~`/clients/attach`~~ | — | ⚠️ **v3.9.0 不存在（404）**，改用 `/clients/update/:email` |
+| ~~`/clients/detach`~~ | — | ⚠️ 同上，未验证 |
 | `/setting/all` | **POST** | 读取全部设置（注意是 POST） |
 | `/setting/update` | POST | 更新设置（**整体覆盖**） |
 | `/setting/restartXrayService` | POST | 重启 Xray |
@@ -286,7 +286,59 @@ payload = {
 `streamSettings` 对 TUIC 基本不用填（证书在 settings.server 里），保持
 `{"network": "tuic", "security": "none"}` 之类的最小结构即可。
 
-### 3.7 支持的协议清单
+### 3.7 HTTP / Mixed（SOCKS5）settings
+
+⚠️ **协议名是 `mixed`，不是 `socks`。** 用 `socks` 建入站会返回
+`request body failed validation`（与 `settings` 内容无关，是协议白名单问题）。
+`mixed` = 「HTTP + SOCKS 同端口」，一个端口两种客户端都能连。
+
+**HTTP 入站**（协议名 `http`）：
+
+```json
+{
+  "accounts": [ { "user": "bowei", "pass": "bowei" } ],
+  "allowTransparent": false
+}
+```
+
+**Mixed 入站**（HTTP + SOCKS5 同端口，协议名 `mixed`）：
+
+```json
+{
+  "auth": "password",
+  "accounts": [ { "user": "bowei", "pass": "bowei" } ],
+  "udp": true
+}
+```
+
+完整 payload 示例：
+
+```python
+payload = {
+    "remark": "JP-SOCKS5-2080", "enable": True, "port": 2080,
+    "protocol": "mixed",                    # ← 不是 "socks"
+    "settings": json.dumps({
+        "auth": "password",
+        "accounts": [{"user": "bowei", "pass": "bowei"}],
+        "udp": True,
+    }, ensure_ascii=False),
+    "streamSettings": json.dumps({"network": "tcp", "security": "none"}),
+    "sniffing": json.dumps({"enabled": True,
+                            "destOverride": ["http", "tls", "quic", "fakedns"]}),
+}
+```
+
+要点：
+
+- ⚠️ **`http` 和 `mixed` 用的是 `accounts`，不是 `clients`**。
+  写 `clients` 数组会被拒；客户端规范化层也不管这两类入站
+  （`/clients/update` 里的 `inboundIds` 加上它们**不会生效**，但不影响使用）。
+- ⚠️ **`pass` 不要留空**。首次用空 `pass` 建完后，建议回读 + 显式更新一次，
+  确保密码真的落库。
+- ⚠️ **端口选 2080 之类，不要用 1080** —— 机房普遍封锁 1080/1081（见 `pitfalls.md` §4.5）。
+- **这两个协议不会出现在 `/inbounds/allLinks` 和订阅里**（见 `pitfalls.md` §6.6）。
+
+### 3.8 支持的协议清单
 
 ```
 vmess | vless | tunnel | http | trojan | shadowsocks | mixed |
@@ -482,3 +534,7 @@ curl -sS -k "${H[@]}" -X POST "$BASE/setting/restartXrayService"
 5. **`cannot unmarshal number into ... .id of type string`** → 回写了 GET 的原始对象（见 §4.3）
 6. **`empty client ID`** → TUIC 客户端缺 `id` 字段（见 §3.6）
 7. **分享链接里是 127.0.0.1** → `shareAddrStrategy` 没设 custom（见 §5.1）
+8. **`request body failed validation`**（建 SOCKS 入站时）→ 协议名要用 `mixed` 不是 `socks`（见 §3.7）
+9. **`/clients/attach` 404** → v3.9.0 没有该端点；改用 `POST /clients/update/<email>` 带 `inboundIds`（见 §4.2）
+10. **订阅里少节点** → HTTP / SOCKS5 本来就不生成链接，只有 vmess/vless/trojan/ss/tuic 进订阅（见 §3.7）
+11. **`allLinks` / 订阅返回空** → 订阅端点（2096）同样要带 `Host` 头，否则 403 空响应（见 §1.2）

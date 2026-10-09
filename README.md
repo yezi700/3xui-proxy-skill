@@ -3,10 +3,11 @@
 `https://github.com/yezi700/3xui-proxy-skill`
 
 一个 WorkBuddy / Claude **Agent Skill**：把一台全新的 Linux VPS 变成一套可用的代理服务
-（3x-ui 面板 + VLESS-REALITY / Hysteria2 / TUIC v5 三协议节点），并输出可直接导入客户端的链接与订阅。
+（3x-ui 面板 + VLESS-REALITY / Hysteria2 / TUIC v5 三协议节点，可选追加 HTTP / SOCKS5），
+并输出可直接导入客户端的链接与订阅。
 
-> 这不是又一个"复制粘贴命令"的教程。它把**真实部署中踩到的 20 多个坑**（系统版本差异、API 陷阱、
-> 客户端兼容性破坏性变更）固化成了可复用的流程与脚本。
+> 这不是又一个"复制粘贴命令"的教程。它把**真实部署中踩到的 30 多个坑**（系统版本差异、API 陷阱、
+> 机房端口封锁、客户端兼容性破坏性变更）固化成了可复用的流程与脚本。
 
 ## 它能解决什么
 
@@ -23,6 +24,10 @@
 | 代理**出口 IP 是 IPv6**，但需要固定 IPv4 出口 | 根因是 Xray `domainStrategy=AsIs` + 系统有 IPv6；`setup_base.sh` 可一键屏蔽 IPv6（**先换 DNS 再关**，带断网自动回滚） |
 | TUIC 节点**时通时不通**，重连就失败 | 3x-ui TUIC 认证要求 `HandshakeComplete`，0-RTT 连接必然认证失败；`fix_tuic_0rtt.py` 一键关闭 0-RTT |
 | **v2rayN / v2rayNG 导入 TUIC 后一直测速超时** | **Xray 内核根本没有 TUIC/Hysteria2**。v2rayN 切 sing-box 内核即可；v2rayNG 无内核切换，只能用 REALITY |
+| 建 SOCKS 入站报 `request body failed validation` | 3x-ui 不认 `socks` 协议名，**必须用 `mixed`**（HTTP + SOCKS 同端口） |
+| 新端口**服务端一切正常，公网就是连不上** | 机房在上游封了 1080/1081 等代理常用端口；`add_http_socks.py` 直接拒绝黑名单端口，建议改用 2080 / 2000-3000 / 7000-9000 |
+| 加了 HTTP/SOCKS5，**订阅里却始终没有** | 3x-ui 只为 vmess/vless/trojan/ss/tuic 生成链接。这是设计如此，改不出来 —— 交付文档需单独列出 |
+| 测新代理**时通时不通**，以为服务端不稳 | 本机开着的代理客户端会截胡 `curl -x`。先用 TCP 裸探测（`/dev/tcp`）连续验证再下结论 |
 
 ## 安装
 
@@ -86,6 +91,7 @@ skill 会自动按 Step 0→8 执行：探测环境 → 系统基线 → 装面�
 │   ├── install_3xui.sh                   # 安装面板 + 证书
 │   ├── deploy_nodes.py                   # 建 3 个节点
 │   ├── fix_tuic_0rtt.py                  # 关闭 TUIC 0-RTT
+│   ├── add_http_socks.py                 # 可选：加 HTTP / SOCKS5(mixed) 入站
 │   ├── merge_subscription.py             # 合并订阅
 │   ├── verify_nodes.sh                   # 端到端验证
 │   └── render_report.py                  # 生成交付文档
@@ -103,7 +109,11 @@ skill 会自动按 Step 0→8 执行：探测环境 → 系统基线 → 装面�
 | **sing-box**（Hiddify / Karing / NekoBox / 旧 Shadowrocket） | ❌ | ✅ | ✅ | 用 Hy2 / TUIC |
 | **mihomo**（Clash Verge / Clash Meta） | ✅ | ✅ | ✅ | 无需调整，最省心 |
 
-详见 `references/protocols-and-clients.md`。
+> **HTTP / SOCKS5 不在这张表里** —— 它们不是翻墙协议，是给「能设代理但不认 vless/tuic」的程序
+> （浏览器插件、系统代理、`HTTP_PROXY`、`curl`/`git`、Docker）用的旁路。所有客户端都能用，
+> 但**不会出现在订阅里**，需要手动填地址。
+
+详见 `references/protocols-and-clients.md`（§7 是 HTTP/SOCKS5 专章）。
 
 ## 发布与更新
 

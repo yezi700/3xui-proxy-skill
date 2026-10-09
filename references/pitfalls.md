@@ -276,6 +276,131 @@ cp -a /root/resolv.conf.bak /etc/resolv.conf
 > 存进数据库**（`settings` 表里已无该键），模板是硬编码的，改起来远比关系统 IPv6 麻烦，
 > **不推荐**。
 
+### 4.5 ⚠️ 上游机房会封锁特定端口（1080 / 1081 等代理常用端口）
+
+**这是最容易被误判成"配置错误"的一类问题。**
+
+**现象**：新开的代理端口，三项检查全部正常，但**从公网就是连不上**：
+
+```bash
+# ① 服务端监听正常
+ss -lntp | grep 1080          # → LISTEN *:1080  users:(("xray-linux-amd6",...))
+# ② 防火墙规则在
+iptables -C INPUT -p tcp --dport 1080 -j ACCEPT && echo "规则存在"
+# ③ VPS 自己连自己公网 IP 通（注意：这个测试【无效】，见 §4.1）
+timeout 5 bash -c "exec 3<>/dev/tcp/103.53.81.160/1080" && echo "通"
+# ④ 但从外部探测 → 全部超时
+```
+
+**根因**：**机房在更上游的位置（机房交换机 / 网关）做了端口过滤**，
+包根本没到达 VPS，所以 iptables 计数不涨、xray 也看不到连接。
+
+日本、美国等地的机房普遍会把 **1080 / 1081 / 3128 / 8888** 这类
+"代理服务常用端口"列入黑名单，目的是防滥发垃圾邮件与开放代理。
+
+**定位方法（对照实验）**——临时在多个端口起监听，从外部逐个探测：
+
+```bash
+# 在 VPS 上（临时，探测完记得清理）
+for p in 1080 1081 2080 7080 8080; do
+  (timeout 30 nc -l -p $p -q 1 </dev/null >/dev/null 2>&1 &)
+  iptables -C INPUT -p tcp --dport $p -j ACCEPT 2>/dev/null \
+    || iptables -I INPUT 12 -p tcp --dport $p -j ACCEPT
+done
+```
+
+```bash
+# 在外部（本机）
+for p in 1080 1081 2080 7080; do
+  timeout 8 bash -c "exec 3<>/dev/tcp/<VPS_IP>/$p" 2>/dev/null \
+    && echo "$p OK" || echo "$p 被封锁"
+done
+# 实测结果示例：1080 封锁 / 1081 OK / 2080 OK / 7080 OK
+```
+
+一旦出现这种"个别端口不通、相邻端口通"的**非连续**结果，就是上游过滤，不是配置问题。
+
+**修复**：**换端口**（唯一有效手段，改 iptables 没用）。
+
+**选端口建议**：
+
+| 段位 | 可用性 |
+|---|---|
+| **1080 / 1081** | ❌ 高概率被封锁 |
+| 3128 / 8080 / 8888 | ⚠️ 偶发被封锁，「8080 可用」不保证每家机房 |
+| **2000-3000** | ✅ 推荐 |
+| **7000-9000** | ✅ 推荐 |
+| 非常见高位端口（如 4xxxx） | ✅ 最稳，但注意别撞面板端口 |
+
+```bash
+# 清理临时监听与规则
+pkill -f "nc -l -p"
+for p in 1081 2080 7080; do
+  while iptables -C INPUT -p tcp --dport $p -j ACCEPT 2>/dev/null; do
+    iptables -D INPUT -p tcp --dport $p -j ACCEPT
+  done
+done
+```
+
+> ⚠️ 注意 `iptables -I INPUT 12` 是**插入**，后面规则的**行号会全部后移**，
+> 删除时用 `-D INPUT -p tcp --dport <port> -j ACCEPT` **按规则内容删**，
+> 不要用 `-D INPUT 12`（行号已变，会删错规则）。
+
+### 4.6 本机开着本地代理客户端时，测远端代理会测不准
+
+**现象**：用 `curl -x http://user:pass@远端:port` 测刚部署的代理，
+**时通时不通**，连续几次超时后突然又通了 —— 极易误判成"服务端不稳定"。
+
+**根因**：本机若运行着代理客户端（Clash / v2rayN / sing-box，监听 `127.0.0.1:10808` 之类），
+且设置了系统代理或 `HTTP_PROXY` 环境变量，`curl` 的请求**可能被本地客户端截胡**，
+走到了错误的出口，与远端代理的真实可用性无关。
+
+**正确的验证姿势**——先用 **TCP 层裸探测**排除干扰：
+
+```bash
+# 不走任何代理，只看 TCP 三次握手能否建立
+for i in 1 2 3 4 5; do
+  timeout 5 bash -c "exec 3<>/dev/tcp/<VPS_IP>/<PORT>" 2>/dev/null \
+    && echo OK || echo TIMEOUT
+done
+```
+
+连续 5-10 次全 OK ⇒ **服务端没问题**，之前的失败是本机干扰。
+
+再做端到端验证（推荐临时清掉本机代理变量，或换一台干净机器）：
+
+```bash
+env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+  curl -s --max-time 15 -x "http://user:pass@<VPS_IP>:8080" https://api.ipify.org
+```
+
+**判据**：连续 10 次全部返回 VPS 的 IPv4 ⇒ 通过。
+若裸探测 OK 但端到端不稳定，先怀疑本机，**不要急着改服务端配置**。
+
+### 4.7 HTTP / SOCKS5 是明文协议，务必限权限
+
+`http` / `mixed` 入站**没有 TLS、没有混淆、没有抗主动探测**，
+流量是标准明文代理协议，任何中间设备都能一眼识别并阻断。
+
+**部署时至少做到**：
+
+1. **必须开认证**（`auth: "password"` + 强密码），绝不部署开放代理 ——
+   开放代理会在几天内被扫描器发现并滥用，机房通常会直接封机器。
+2. **不要用 1080 等常见端口**（见 §4.5，机房会封）。
+3. **按来源 IP 限制**（能确定使用方 IP 时最稳妥）：
+
+   ```bash
+   # 只允许指定 IP 访问 8080
+   iptables -R INPUT <行号> -s <你的IP> -p tcp --dport 8080 -j ACCEPT
+   netfilter-persistent save
+   ```
+
+4. **交付文档里明确标注**"仅建议在受信任网络使用，不要当主力翻墙手段"。
+
+> 定位：HTTP / SOCKS5 只是**给「能设代理但不认 vless/tuic」的程序用的旁路**
+> （浏览器插件、系统代理、`HTTP_PROXY` 环境变量、`curl`/`git`），
+> 主力抗封锁仍然靠 REALITY / Hysteria2 / TUIC。
+
 ---
 
 ## 五、SSH 自动化
@@ -387,6 +512,94 @@ grep -rn "tuic" <xray-source>/infra/conf/ | wc -l              # → 0
 journalctl -u x-ui --no-pager -n 500 | grep -iE "tuic|auth"
 iptables -t filter -L INPUT -v -n | grep 8443     # 命中数持续增长 → 包确实到了，服务端没问题
 ```
+
+### 6.5 建 SOCKS 入站必须用协议名 `mixed`，用 `socks` 会被拒
+
+**现象**：`POST /panel/api/inbounds/add` 建 SOCKS5 入站，无论 `settings` 怎么写，
+一律返回：
+
+```
+request body failed validation
+```
+
+**已经试过、全部失败的写法**（不要再重复试）：
+
+| `settings` 内容 | 结果 |
+|---|---|
+| `{"auth":"password","accounts":[{"user":"u","pass":"p"}],"udp":true,"ip":"127.0.0.1"}` | ❌ 校验失败 |
+| `{"auth":"password","accounts":[{"user":"u","pass":"p"}],"udp":true}` | ❌ 校验失败 |
+| `{"auth":"noauth","accounts":[],"udp":true}` | ❌ 校验失败 |
+| `{}`（空对象） | ❌ 校验失败 |
+| 带 / 不带 `streamSettings`、`sniffing`、`allocate` | ❌ 均失败 |
+
+**根因**：3x-ui v3.9.0 的**入站校验器不认 `socks` 这个协议名字符串**，
+与 `settings` 内容无关。（对比：`strings` 里能查到 `socks` 字样，但那是 Xray 侧旧字段，
+面板 HTTP 层的协议白名单里用的是另一套。）
+
+**修复**：**协议名改用 `mixed`。** `mixed` 是「HTTP + SOCKS 同端口」协议，
+Xray 内部为它单独开两个协议嗅探分支，因此**同一个端口能同时接受两种客户端**：
+
+```python
+payload = {
+    "remark": "JP-SOCKS5-2080", "enable": True, "port": 2080,
+    "protocol": "mixed",                       # ← 关键：不是 "socks"
+    "settings": json.dumps({
+        "auth": "password",
+        "accounts": [{"user": "user", "pass": "pass"}],
+        "udp": True,                            # 允许 UDP ASSOCIATE
+    }),
+    "streamSettings": json.dumps({"network": "tcp", "security": "none"}),
+    "sniffing": json.dumps({"enabled": True,
+                            "destOverride": ["http", "tls", "quic", "fakedns"]}),
+}
+```
+
+**验证两种写法都能用**：
+
+```bash
+curl -x "http://user:pass@<IP>:2080"      https://api.ipify.org   # HTTP 写法
+curl --proxy "socks5h://user:pass@<IP>:2080" https://api.ipify.org  # SOCKS5 写法
+# 两者应返回同一个出口 IP
+```
+
+> ⚠️ 另外注意：**`http` 入站的 `settings` 结构不同**，是
+> `{"accounts":[{"user":"..","pass":".."}],"allowTransparent":false}`，
+> 用 `clients` 数组会被拒。建完后建议回读确认 `pass` 真的写进去了
+> （留空的 `pass` 可能被规范化层丢掉，导致认证行为异常）。
+
+### 6.6 HTTP / SOCKS5 入站**不会**出现在订阅里（设计如此，不是 bug）
+
+**现象**：`http` / `mixed` 入站建好、客户端也绑了，但订阅 URL 里**始终只有
+vless / hysteria2 / tuic 三个节点**，新增的两个怎么都不出现。
+
+**根因**：3x-ui 的订阅服务内置的链接生成器只覆盖 5 种协议。查二进制可确认：
+
+```bash
+strings /usr/local/x-ui/x-ui | grep -oE "gen[A-Za-z]+Link" | sort -u
+# → genShadowsocksLink
+#   genTrojanLink
+#   genTuicLink
+#   genVlessLink
+#   genVmessLink
+#   （没有 genHttpLink / genSocksLink）
+```
+
+`/panel/api/inbounds/allLinks` 同样只返回这 5 类协议的链接。
+
+**这不是配置问题，改什么都改不出来。** 语义上也是合理的：
+`http://` / `socks://` 这类链接对翻墙客户端（v2rayN / sing-box / Clash）没有意义，
+订阅本来就不该带它们。
+
+**正确做法**：**在交付文档里单独给出 HTTP / SOCKS5 的连接信息**，
+并明确告诉用户"这两个不在订阅里，需手动填"。文档模板：
+
+| 节点 | 地址 | 账号 | 用途 |
+|---|---|---|---|
+| HTTP 代理 | `<IP>:8080` | `user` / `pass` | 浏览器插件、系统代理、`HTTP_PROXY` |
+| SOCKS5 代理 | `<IP>:2080` | `user` / `pass` | `curl` / `git` / 需要 UDP 的程序 |
+
+> 顺带：**订阅端点本身也需要 `Host` 头**（与面板 API 同一套 `DomainValidatorMiddleware`）。
+> 从本机探测时：不带 → `403` 空响应；带 `Host: <域名>` → `200` + base64 节点列表。
 
 ---
 
