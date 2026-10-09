@@ -231,10 +231,17 @@ def main() -> int:
     p = sub.add_parser("get-inbound")
     p.add_argument("id", type=int)
 
+    p = sub.add_parser("del-inbound",
+                       help="删除入站（用数字 id，避开 Windows Git Bash 的路径转换）")
+    p.add_argument("id", type=int)
+
     p = sub.add_parser("set-share-addr")
     p.add_argument("addr")
 
-    p = sub.add_parser("raw")
+    p = sub.add_parser("raw",
+                       help="直接调用任意端点。⚠️ Windows Git Bash 会把以 / 开头的参数"
+                            "转成路径（/inbounds/del/4 → D:/.../inbounds/del/4）；"
+                            "请改用专用子命令，或先设 MSYS_NO_PATHCONV=1")
     p.add_argument("method")
     p.add_argument("endpoint")
     p.add_argument("--body", help="JSON 字符串")
@@ -258,6 +265,8 @@ def main() -> int:
         _print(api.settings_all())
     elif args.cmd == "get-inbound":
         _print(XuiApi.decode_inbound(api.inbound_get(args.id)))
+    elif args.cmd == "del-inbound":
+        _print(api.inbound_del(args.id))
     elif args.cmd == "set-share-addr":
         _print(api.set_share_addr(args.addr))
     elif args.cmd == "raw":

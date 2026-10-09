@@ -507,6 +507,20 @@ curl -sS -k "${H[@]}" -X POST "$BASE/setting/all" | python3 -m json.tool
 curl -sS -k "${H[@]}" -X POST "$BASE/setting/restartXrayService"
 ```
 
+> ⚠️ **Windows Git Bash 用户**：上面这些以 `/` 开头的端点参数会被 MSYS 转换成
+> Windows 路径（`/inbounds/del/4` → `D:/.../PortableGit/inbounds/del/4`），
+> 结果是莫名其妙的 **404**。优先用本仓库的 CLI：
+>
+> ```bash
+> python scripts/xui_api.py list-inbounds
+> python scripts/xui_api.py del-inbound 4      # 数字 id 参数，不经过 shell 路径转换
+>
+> # 非要手写端点时，关掉本次命令的转换
+> MSYS_NO_PATHCONV=1 python scripts/xui_api.py raw POST /inbounds/del/4
+> ```
+>
+> 详见 `pitfalls.md` §1.6。
+
 ---
 
 ## 7. 调试检查表
@@ -531,3 +545,7 @@ curl -sS -k "${H[@]}" -X POST "$BASE/setting/restartXrayService"
     改完必须 `systemctl restart x-ui`（见 `pitfalls.md` §2.6）
 13. **`sqlite3 ... where key='apiToken'` 读不到 Token** → v3.9.0 只存 SHA-256（见 §1.1）
 14. **想加 AnyTLS** → 3x-ui v3.9.0 不支持，换 sing-box / mihomo 服务端（见 §3.7）
+15. **同一端点：命令行里调返回 404，写在 Python 里调却 200** →
+    Windows Git Bash 的 MSYS 路径转换改写了参数（见 `pitfalls.md` §1.6）。
+    改用 `xui_api.py del-inbound <id>` 这类数字 id 子命令，或 `MSYS_NO_PATHCONV=1`。
+    诊断窍门：看报错回显的完整 URL 里是否混进了 `D:/.../PortableGit/...`

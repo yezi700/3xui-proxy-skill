@@ -50,6 +50,7 @@ Hysteria2 走 UDP 443 + 端口跳跃，高丢包链路吞吐最强；TUIC 走 UD
 | 想加 AnyTLS 节点 | **3x-ui v3.9.0 不支持**（`xray-linux-amd64` 与 `x-ui` 二进制里 `anytls` 均 0 命中），只有 sing-box / mihomo 实现 |
 | 装完 API Token 读不出来 | v3.9.0 的 `api_tokens` 表**只存 SHA-256**，明文仅创建时返回一次。脚本改用「登录会话 + `POST /panel/api/setting/apiTokens/create`」获取 |
 | Windows 上 `git clone` 后 `.sh` 脚本报 `$'\r': command not found` | Git 的 `core.autocrlf` 把脚本换成了 CRLF。仓库已加 `.gitattributes` 强制 `*.sh`/`*.py` 用 LF；老工作区若仍是 CRLF，用 [`pitfalls.md` §1.5.1](references/pitfalls.md) 的手法重写 |
+| 在 Git Bash 里调面板 API，端点参数 `/inbounds/del/4` 返回 **404**，同一端点写在 Python 里却 200 | MSYS 把以 `/` 开头的参数转成了 Windows 路径。改用 `xui_api.py del-inbound 4`，或设 `MSYS_NO_PATHCONV=1`（§1.6） |
 | 测新代理**时通时不通**，以为服务端不稳 | 本机开着的代理客户端会截胡 `curl -x`。先用 TCP 裸探测（`/dev/tcp`）连续验证再下结论 |
 
 完整的「现象 → 根因 → 修复」见 [`references/pitfalls.md`](references/pitfalls.md)。
@@ -277,6 +278,14 @@ Bash 行为测试在 Linux/macOS 使用系统 `bash`，Windows 使用 Git for Wi
 ---
 
 ## 版本历史
+
+### v1.3.2
+
+- **新增 `xui_api.py del-inbound <id>` 子命令**：用数字 id 删除入站，路径在 Python
+  内部拼接，避开 Windows Git Bash 的 MSYS 路径转换（`/inbounds/del/4` 会被悄悄
+  改写成 `D:/.../PortableGit/inbounds/del/4`，导致莫名其妙的 404）。
+- `raw` 子命令的帮助文本加上该陷阱的提示；`pitfalls.md` 新增 §1.6 记录现象、
+  根因、修复与诊断方法。
 
 ### v1.3.1
 

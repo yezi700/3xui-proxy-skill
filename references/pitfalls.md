@@ -146,6 +146,42 @@ done
 
 全部输出 `LF` 就说明规则有效（`.sh` / `.py` 尤其重要）。
 
+### 1.6 ⚠️ Windows Git Bash 会把以 `/` 开头的命令参数悄悄转成路径
+
+**现象**：在 Git Bash 里执行
+
+```bash
+python scripts/xui_api.py raw POST /inbounds/del/4
+```
+
+返回 **`HTTP 404`**（响应体为空）。但同样的端点写在 Python 代码里调用却是
+**`HTTP 200 {"success":true,...}`** —— 端点没错，是参数被改掉了。
+
+**根因**：MSYS2 / Git Bash 会对命令行参数做「POSIX 路径 → Windows 路径」转换。
+`/inbounds/del/4` 被当成绝对路径，前缀被替换成 Git 的安装目录，
+真正发出去的 URL 变成：
+
+```
+https://<vps>:46821/<面板路径>/panel/api/D:/AI/.../PortableGit/inbounds/del/4
+```
+
+**修复**（任选其一）：
+
+```bash
+# 1) 关掉本次命令的路径转换
+MSYS_NO_PATHCONV=1 python scripts/xui_api.py raw POST /inbounds/del/4
+
+# 2) 更稳：改用专用子命令，路径在 Python 内部拼，不经过 shell
+python scripts/xui_api.py del-inbound 4
+```
+
+**诊断方法**：看报错里回显的**完整 URL**。若中间混进了 `D:/.../PortableGit/...`
+或 `C:/Program Files/Git/...` 这类片段，就是这个坑。
+
+> 同类问题出现在任何「把 `/xxx` 当参数传给 Windows 程序」的场景：
+> `curl -H`、`docker -v /a:/b`、`ssh` 的远端路径等。
+> 这也是为什么本仓库的脚本一律用**数字 id**而不是路径片段做参数。
+
 ---
 
 ## 二、3x-ui 面板 API

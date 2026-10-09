@@ -4,7 +4,7 @@ description: 在全新 VPS 上部署 3x-ui 面板与抗封锁代理节点（VLES
 metadata:
   description_zh: 在 VPS 上部署 3x-ui 面板与 Reality / Hysteria2 / TUIC 代理节点
   description_en: Deploy a 3x-ui panel with VLESS-REALITY, Hysteria2 and TUIC v5 proxy nodes on a VPS
-  version: 1.3.1
+  version: 1.3.2
 ---
 
 # 3x-ui 代理节点部署
